@@ -1,4 +1,4 @@
-# programfirst
+# smart-env-monitor
 
 > 面向嵌入式软件开发的项目实践仓库，当前重点展示基于 STM32 与 FreeRTOS 的室内环境智能感知与调控系统。
 
