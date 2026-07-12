@@ -1,0 +1,32 @@
+# Keil MDK build output and browse information
+MDK-ARM/*/
+MDK-ARM/DebugConfig/
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.o
+*.d
+*.crf
+*.dep
+*.lnp
+*.sct
+*.htm
+*.build_log.htm
+
+# Keil user-specific workspace settings
+*.uvguix.*
+*.uvoptx
+
+# Unused CMSIS-DSP and CMSIS-NN samples/test suites (not referenced by this project)
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/NN/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*.bak
+*.tmp
+Thumbs.db
+.DS_Store
