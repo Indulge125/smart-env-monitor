@@ -203,6 +203,10 @@ cd smart-env-monitor/smart_env_monitor
 - 补充任务栈水位、运行时统计和异常日志，增强可观测性。
 - 增加上位机或 Web 仪表盘演示，展示完整端到端数据链路。
 
+## 📬 联系方式
+
+如需交流项目、嵌入式开发或合作，可发送邮件至 [1156852317@qq.com](mailto:1156852317@qq.com)。
+
 ---
 
 <div align="center">
