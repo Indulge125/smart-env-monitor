@@ -123,6 +123,10 @@ static volatile uint32_t dtu_rx_overflow = 0;   /* 环满丢字节计数（可�
 static volatile uint32_t dtu_rx_lines = 0;      /* 已处理命令行计数（可观测） */
 static char dtu_cmd_line[DTU_RX_RING_SIZE];     /* 任务私有组行缓冲，无竞争 */
 static uint16_t dtu_line_len = 0;
+
+/* 收到指令的原样回显到调试口：验证"指令确实进入 USART1 且无乱码"。
+   发送侧问题（接线打架/串口助手没带回车）一眼可辨。验证完可置 0 关闭。 */
+#define DTU_RX_ECHO 1
 static volatile uint8_t dtu_connected = 0;
 
 #define DTU_USE_RDY_PIN 0
@@ -808,6 +812,11 @@ static void DTU_ProcessRx(void)
       if (dtu_line_len > 0)
       {
         dtu_cmd_line[dtu_line_len] = '\0';
+#if DTU_RX_ECHO
+        UART2_Print("[DTU] RX: ");
+        UART2_Print(dtu_cmd_line);
+        UART2_Print("\r\n");
+#endif
         DTU_ParseCommand(dtu_cmd_line);
         dtu_rx_lines++;
         dtu_line_len = 0;
