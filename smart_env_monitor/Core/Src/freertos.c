@@ -338,7 +338,7 @@ void Task1(void *argument)
 void Task2(void *argument)
 {
   /* USER CODE BEGIN Task2 */
-  char line1[17], line2[17];
+  char line[17];
   WorkMode_t last_mode = (WorkMode_t)-1;
   int last_light = -1, last_temp = -1;
   uint8_t last_set_state = 0xFF;
@@ -354,16 +354,21 @@ void Task2(void *argument)
         if (last_mode != MODE_SET || last_set_state != g_set_state ||
             last_lt != g_light_threshold || last_tt != g_temp_threshold)
         {
-            snprintf(line1, sizeof(line1), "Light Thr:%2d%%", g_light_threshold);
-            OLED_ShowString(1, 1, line1);
+            /* 每行固定 16 字符全宽覆盖，杜绝模式切换后残留旧字符（如 "Bright:96%%"） */
+            snprintf(line, sizeof(line), "Light Thr:%2d%%   ", g_light_threshold);
+            vTaskSuspendAll();  /* 防止高优先级任务在 bit-bang I2C 中途抢占导致断帧 */
+            OLED_ShowString(1, 1, line);
+            xTaskResumeAll();
 
-            snprintf(line2, sizeof(line2), "Temp Thr:%2dC ", g_temp_threshold);
-            OLED_ShowString(2, 1, line2);
+            snprintf(line, sizeof(line), "Temp Thr:%2dC    ", g_temp_threshold);
+            vTaskSuspendAll();
+            OLED_ShowString(2, 1, line);
+            xTaskResumeAll();
 
             switch (g_set_state)
             {
-                case 0:  OLED_ShowString(3, 1, "Set Light Thr  "); break;
-                case 1:  OLED_ShowString(3, 1, "Set Temp Thr   "); break;
+                case 0:  OLED_ShowString(3, 1, "Set Light Thr   "); break;
+                case 1:  OLED_ShowString(3, 1, "Set Temp Thr    "); break;
                 case 2:  OLED_ShowString(3, 1, "Save&Exit       "); break;
             }
             last_set_state = g_set_state;
@@ -378,15 +383,19 @@ void Task2(void *argument)
 
         if (last_mode != g_work_mode || last_light != light_int)
         {
-            snprintf(line1, sizeof(line1), "Bright:%3d%%", light_int);
-            OLED_ShowString(1, 1, line1);
+            snprintf(line, sizeof(line), "Bright:%3d%%     ", light_int);
+            vTaskSuspendAll();
+            OLED_ShowString(1, 1, line);
+            xTaskResumeAll();
             last_light = light_int;
         }
 
         if (last_mode != g_work_mode || last_temp != temp_int)
         {
-            snprintf(line2, sizeof(line2), "Temp:   %2dC ", temp_int);
-            OLED_ShowString(2, 1, line2);
+            snprintf(line, sizeof(line), "Temp:   %2dC     ", temp_int);
+            vTaskSuspendAll();
+            OLED_ShowString(2, 1, line);
+            xTaskResumeAll();
             last_temp = temp_int;
         }
 
