@@ -1,0 +1,29 @@
+# ---- 备份目录（物理删除前先在磁盘保留） ----
+smart_env_monitor - 副本/
+
+# ---- 生成产物 / 构建输出 ----
+outputs/
+zhijing_edge_gateway/build/
+**/build/
+node_modules/
+CMakeUserPresets.json
+*.cmake
+
+# ---- 二进制文档（简历 / 比赛材料成品，不纳入版本库） ----
+*.docx
+*.pptx
+
+# ---- 比赛材料过程文件（含第三方模板信息，切勿外发） ----
+参赛材料/模板结构提取.txt
+参赛材料/项目上下文提取.txt
+参赛材料/材料生成摘要.json
+参赛材料/artifact-build-manifest.json
+
+# ---- 重复资源（只保留 assets_new_template） ----
+参赛材料/assets/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+*.log
+Thumbs.db
+.DS_Store
