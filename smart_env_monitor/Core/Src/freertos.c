@@ -124,8 +124,11 @@ static volatile uint32_t dtu_rx_lines = 0;      /* 已处理命令行计数（�
 static char dtu_cmd_line[DTU_RX_RING_SIZE];     /* 任务私有组行缓冲，无竞争 */
 static uint16_t dtu_line_len = 0;
 
-/* 收到指令的原样回显到调试口：验证"指令确实进入 USART1 且无乱码"。
-   发送侧问题（接线打架/串口助手没带回车）一眼可辨。验证完可置 0 关闭。 */
+/* 收到指令的双重回显（验证用）：
+   ① 打到调试口 [DTU] RX: xxx；
+   ② 原样回发 USART1(PA9)——串口助手 RX 接 PA9 时能直接看到自己发的
+      指令弹回来，证明 助手TX→PA10 与 PA9→助手RX 双向链路都通。
+   验证完成后置 0 关闭。 */
 #define DTU_RX_ECHO 1
 static volatile uint8_t dtu_connected = 0;
 
@@ -816,6 +819,8 @@ static void DTU_ProcessRx(void)
         UART2_Print("[DTU] RX: ");
         UART2_Print(dtu_cmd_line);
         UART2_Print("\r\n");
+        /* 原样回发 USART1：验证接线时，助手端直接看到自己发的指令回来 */
+        DTU_SendData(dtu_cmd_line);
 #endif
         DTU_ParseCommand(dtu_cmd_line);
         dtu_rx_lines++;
