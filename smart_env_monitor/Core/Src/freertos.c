@@ -183,6 +183,7 @@ const osMessageQueueAttr_t xKeyQueue_attributes = {
 static uint16_t SensorFilter(uint16_t new_val, uint16_t *buf, uint32_t *sum);
 static uint16_t ADC_ReadChannel(uint32_t channel);
 static void UART2_Print(const char *msg);
+static void PrintStackWatermarks(void);
 static void DTU_Init(void);
 static uint8_t DTU_IsConnected(void);
 static void DTU_SendData(const char *data);
@@ -317,6 +318,7 @@ void Task1(void *argument)
                "[SENSOR] {\"light\":%d,\"temp\":%d,\"mode\":%d,\"servo\":%d}\r\n",
                l, t, (int)g_work_mode, (int)g_servo_pulse);
       UART2_Print(debug_json);
+      PrintStackWatermarks();
       last_debug = HAL_GetTick();
     }
 
@@ -623,6 +625,21 @@ static void UART2_Print(const char *msg)
   {
     osMutexRelease(xHuart2Mutex);
   }
+}
+
+/* 周期打印各任务栈剩余量（osThreadGetStackSpace 内部 = uxTaskGetStackHighWaterMark × 4 字节） */
+static void PrintStackWatermarks(void)
+{
+  char line[128];
+  snprintf(line, sizeof(line),
+           "[STACK] Sensor:%4uB Dsp:%4uB Ctl:%4uB Dtu:%4uB Key:%4uB Def:%4uB\r\n",
+           (unsigned)osThreadGetStackSpace(SensorTaskHandle),
+           (unsigned)osThreadGetStackSpace(DisplayTaskHandle),
+           (unsigned)osThreadGetStackSpace(ControlTaskHandle),
+           (unsigned)osThreadGetStackSpace(WifiTaskHandle),
+           (unsigned)osThreadGetStackSpace(KeyTaskHandle),
+           (unsigned)osThreadGetStackSpace(defaultTaskHandle));
+  UART2_Print(line);
 }
 
 static void DTU_Init(void)
