@@ -284,7 +284,7 @@ def make_task_diagram() -> Path:
         ((80, 430, 430, 570), "#F1F5F9", "#475569", "KeyTask\n按键去抖\n模式/阈值设置"),
         ((560, 180, 930, 320), "#DCFCE7", "#16A34A", "DisplayTask\nOLED 显示\n亮度/温度/模式"),
         ((560, 390, 930, 530), "#FEF3C7", "#D97706", "ControlTask\n阈值判断\n舵机/LED/报警"),
-        ((1060, 255, 1430, 415), "#EDE9FE", "#7C3AED", "WifiTask / DTU\nUSART1 JSON\n上云与命令解析"),
+        ((1060, 255, 1430, 415), "#EDE9FE", "#7C3AED", "DtuTask / DTU\nUSART1 JSON\n上云与命令解析"),
         ((1060, 500, 1430, 640), "#F8FAFC", "#94A3B8", "defaultTask\n系统空闲维护"),
     ]
     for xy, fill, outline, text in items:
@@ -445,7 +445,7 @@ def create_project_plan(docx_path: Path, diagrams: dict[str, Path]) -> None:
     doc.add_picture(str(diagrams["tasks"]), width=Inches(6.3))
     doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph(
-        "工程在 STM32CubeMX 中配置 CMSIS-RTOS v2，创建 SensorTask、DisplayTask、ControlTask、WifiTask、KeyTask 和 defaultTask 六个线程，并配置 xSensorQueue、xKeyQueue 两个消息队列。任务拆分使采集、显示、控制、通信互不阻塞，适合在答辩中解释实时系统设计思路。"
+        "工程在 STM32CubeMX 中配置 CMSIS-RTOS v2，创建 SensorTask、DisplayTask、ControlTask、DtuTask、KeyTask 和 defaultTask 六个线程，并配置 xSensorQueue、xKeyQueue 两个消息队列。任务拆分使采集、显示、控制、通信互不阻塞，适合在答辩中解释实时系统设计思路。"
     )
 
     task_table = doc.add_table(rows=1, cols=4)
@@ -455,7 +455,7 @@ def create_project_plan(docx_path: Path, diagrams: dict[str, Path]) -> None:
         ["SensorTask", "AboveNormal / 256", "采集 PA0/PA1，滤波换算并更新全局真实传感器值。", "1s 采样；5s 输出 [SENSOR] JSON"],
         ["DisplayTask", "Normal / 256", "刷新 OLED，显示温度、亮度、模式和阈值设置界面。", "300ms"],
         ["ControlTask", "AboveNormal / 256", "根据阈值控制舵机、LED 和报警状态。", "200ms"],
-        ["WifiTask", "BelowNormal / 512", "初始化 DTU，构造 JSON，处理下行命令。", "60s 上报"],
+        ["DtuTask", "BelowNormal / 512", "初始化 DTU，构造 JSON，处理下行命令。", "60s 上报"],
         ["KeyTask", "High / 128", "按键去抖、模式切换、阈值调节。", "按键事件触发"],
     ]
     for row in task_rows:
@@ -617,8 +617,8 @@ VIDEO_SECTIONS = [
     {
         "time": "1:10-1:45",
         "scene": "FreeRTOS 架构",
-        "action": "展示 PPT 的任务架构页或代码片段，指向 SensorTask、DisplayTask、ControlTask、WifiTask、KeyTask。",
-        "script": "软件上我们没有使用简单的裸机循环，而是用 FreeRTOS 拆成多个任务。SensorTask 采集传感器，DisplayTask 刷新 OLED，ControlTask 做阈值判断和执行控制，WifiTask 负责 DTU 通信，KeyTask 处理按键输入。这样每个功能互不阻塞，也方便后续扩展。",
+        "action": "展示 PPT 的任务架构页或代码片段，指向 SensorTask、DisplayTask、ControlTask、DtuTask、KeyTask。",
+        "script": "软件上我们没有使用简单的裸机循环，而是用 FreeRTOS 拆成多个任务。SensorTask 采集传感器，DisplayTask 刷新 OLED，ControlTask 做阈值判断和执行控制，DtuTask 负责 DTU 通信，KeyTask 处理按键输入。这样每个功能互不阻塞，也方便后续扩展。",
         "evidence": "突出工程化和实时性。",
     },
     {

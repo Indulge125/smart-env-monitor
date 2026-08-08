@@ -129,7 +129,7 @@ def make_task_architecture(path):
         ((580, 205, 940, 350), "#dcfce7", "#16a34a", "DisplayTask", "OLED 显示\n亮度/温度/模式"),
         ((580, 430, 940, 575), "#fef3c7", "#d97706", "ControlTask", "阈值判断\n舵机/LED/报警"),
         ((80, 495, 440, 635), "#f8fafc", "#475569", "KeyTask", "按键去抖\n模式/阈值设置"),
-        ((1085, 265, 1455, 430), "#ede9fe", "#7c3aed", "WifiTask / DTU", "USART1 JSON\n上云与命令解析"),
+        ((1085, 265, 1455, 430), "#ede9fe", "#7c3aed", "DtuTask / DTU", "USART1 JSON\n上云与命令解析"),
         ((1085, 585, 1455, 720), "#f8fafc", "#94a3b8", "defaultTask", "系统空闲维护"),
     ]
     for item in specs:
