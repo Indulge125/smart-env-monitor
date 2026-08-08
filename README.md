@@ -35,7 +35,7 @@ Smart Env Monitor 是一个运行在 **STM32F103C8T6** 上的嵌入式环境监�
 | 🖥️ | 本地交互 | OLED 显示数据与模式，按键支持模式切换、阈值设置和舵机调节。 |
 | 🎛️ | 自动控制 | 根据光照、温度阈值联动 PWM 舵机、状态 LED、告警 LED 与蜂鸣器。 |
 | 📡 | 网关通信 | UART 定时上报 JSON 遥测数据，解析模式、舵机和 LED 控制指令。 |
-| 🛡️ | 异常恢复 | 检测 DTU 连接状态，连续异常时执行硬件复位与通信重新初始化。 |
+| 🛡️ | 异常恢复 | IWDG 看门狗约 2 s 超时，任务死循环/故障自动硬件复位自愈。 |
 
 ## 🧩 系统设计
 
@@ -57,7 +57,7 @@ Smart Env Monitor 是一个运行在 **STM32F103C8T6** 上的嵌入式环境监�
 | `SensorTask` | AboveNormal | 1000 ms | ADC 采样、16 点滤波、数据换算与调试输出。 |
 | `ControlTask` | AboveNormal | 200 ms | 根据工作模式和阈值控制舵机与 LED。 |
 | `DisplayTask` | Normal | 300 ms | 在状态变化时刷新 OLED，减少重复写入。 |
-| `DtuTask` | BelowNormal | 200 ms | 解析指令、检测连接并按 5 秒周期上报遥测数据。 |
+| `DtuTask` | BelowNormal | 200 ms | 解析指令（DTU/调试口双通道）、按 5 秒周期上报遥测数据。 |
 
 任务创建、优先级和核心业务逻辑集中在 [`Core/Src/freertos.c`](smart_env_monitor/Core/Src/freertos.c)。
 
@@ -164,7 +164,7 @@ flowchart LR
 | 遥测上报周期 | 5 s | USART1 输出 `dup` JSON |
 | 舵机 PWM | 50 Hz，500–2500 μs | TIM1 预分频 71 / 周期 19999 |
 
-> 任务栈水位、精确采样抖动等指标为后续 `uxTaskGetStackHighWaterMark` 实测补充项。
+> 任务栈水位由板上 `[STACK]` 日志每 5 s 实测输出（`osThreadGetStackSpace`）；精确采样抖动为后续补充项。
 
 ## 🚀 快速开始
 
@@ -196,9 +196,12 @@ cd smart-env-monitor/smart_env_monitor
 - [x] 自动 / 手动 / 设置模式
 - [x] 舵机 PWM、LED 与蜂鸣器控制
 - [x] UART JSON 遥测与控制指令解析
-- [x] DTU 异常检测与复位恢复
+- [x] UART 环形缓冲：连续指令不丢帧，溢出/重挂计数可观测
+- [x] IWDG 看门狗异常自恢复（约 2 s 超时硬件复位）
+- [x] 任务栈水位与命令接收统计实测输出
+- [x] 通信协议文档（引脚接线表 + 指令集 + 调试口说明，见固件 README）
+- [x] 网关 `--self-test` + 网关/固件 CI
 - [ ] 补充实物接线图、运行照片与演示视频
-- [ ] 增加独立协议文档和网关联调示例
 
 ## 🗺️ 后续计划
 

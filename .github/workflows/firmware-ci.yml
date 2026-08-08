@@ -1,0 +1,25 @@
+name: firmware-ci
+
+on:
+  push:
+    paths:
+      - 'smart_env_monitor/Core/**'
+      - 'smart_env_monitor/User/**'
+      - 'smart_env_monitor/ci/**'
+      - '.github/workflows/firmware-ci.yml'
+  pull_request:
+    paths:
+      - 'smart_env_monitor/Core/**'
+      - 'smart_env_monitor/User/**'
+
+jobs:
+  compile-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM GNU toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Run firmware compile gate
+        run: bash smart_env_monitor/ci/compile-gate.sh
