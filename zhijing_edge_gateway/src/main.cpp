@@ -1190,31 +1190,54 @@ static HANDLE openSerialPort(const std::string& portName, DWORD baudRate) {
     return port;
 }
 
+/* 串口重连参数：拔线/设备掉电/串口助手占用时，网关保持存活，Web 持续可用 */
+static constexpr DWORD kSerialRetryMs = 2000;
+static constexpr long long kSerialErrorLogIntervalMs = 10000;
+
 static int runSerialMode(const std::string& portName, DWORD baudRate, const std::optional<MqttConfig>& mqttConfig) {
-    HANDLE port = openSerialPort(portName, baudRate);
-    if (port == INVALID_HANDLE_VALUE) {
-        return 1;
-    }
-
-    std::cout << "Connected to " << portName << " at " << baudRate << ". Waiting for [SENSOR] lines...\n";
-
     std::unique_ptr<MqttPublisher> mqtt;
     if (mqttConfig.has_value()) {
         mqtt = std::make_unique<MqttPublisher>(*mqttConfig);
     }
 
     std::string line;
-    while (true) {
-        if (!g_running) {
-            break;   /* Ctrl+C：ReadFile 最多 50ms 返回一次，退出有界 */
+    long long lastErrLog = 0;
+    HANDLE port = INVALID_HANDLE_VALUE;
+
+    while (g_running) {
+        if (port == INVALID_HANDLE_VALUE) {
+            port = openSerialPort(portName, baudRate);
+            if (port == INVALID_HANDLE_VALUE) {
+                /* 打开失败不退出：等用户关串口助手 / 插回线 / 纠正串口号 */
+                const long long now = currentTimeMs();
+                if (now - lastErrLog >= kSerialErrorLogIntervalMs) {
+                    std::cerr << "Serial port unavailable (" << portName << "). "
+                              << "Close serial tools or reconnect the cable. "
+                              << "Retrying every " << (kSerialRetryMs / 1000) << "s...\n";
+                    lastErrLog = now;
+                }
+                Sleep(kSerialRetryMs);
+                continue;
+            }
+            std::cout << "Connected to " << portName << " at " << baudRate
+                      << ". Waiting for [SENSOR] lines...\n";
+            line.clear();   /* 重连成功后丢弃残留在旧连接上的半行 */
         }
 
         char ch = 0;
         DWORD bytesRead = 0;
         if (!ReadFile(port, &ch, 1, &bytesRead, nullptr)) {
-            std::cerr << "Serial read failed. Device may be disconnected.\n";
+            /* 拔线/设备掉电：关闭句柄进入重连循环；
+               Web 端由新鲜度判定显示"数据超时"，插回自动恢复 */
+            const long long now = currentTimeMs();
+            if (now - lastErrLog >= kSerialErrorLogIntervalMs) {
+                std::cerr << "Serial link lost on " << portName << ". Reconnecting...\n";
+                lastErrLog = now;
+            }
             CloseHandle(port);
-            return 2;
+            port = INVALID_HANDLE_VALUE;
+            Sleep(kSerialRetryMs);
+            continue;
         }
 
         if (bytesRead == 0) {
@@ -1243,7 +1266,9 @@ static int runSerialMode(const std::string& portName, DWORD baudRate, const std:
         }
     }
 
-    CloseHandle(port);
+    if (port != INVALID_HANDLE_VALUE) {
+        CloseHandle(port);
+    }
     std::cout << "Stopped.\n";
     return 0;
 }
