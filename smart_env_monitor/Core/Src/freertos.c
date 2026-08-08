@@ -57,6 +57,7 @@
 #define TEMP_THR_STEP    5     /* 温度阈值步进(°C) */
 #define TEMP_THR_DEFAULT 30    /* 温度阈值初值(°C) */
 #define VIN_REPORT_DV    33    /* 供电电压上报(×0.1V)，当前为占位值未实测 */
+#define KEY_DEBOUNCE_MS  30    /* KEY_MODE 消抖窗口(ms)，与 KEY_SET 轮询消抖一致 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -530,36 +531,43 @@ void Task5(void *argument)
 
   for (;;)
   {
-    /* ---- KEY_MODE (PA4)：中断驱动 ---- */
+    /* ---- KEY_MODE (PA4)：EXTI 中断 + 任务内消抖 ---- */
     if (osSemaphoreAcquire(xSem_Key, 10) == osOK)
     {
-        if (g_work_mode == MODE_SET)
+        /* 消抖：等信号稳定后重读引脚，确认按键确实按下 */
+        osDelay(KEY_DEBOUNCE_MS);
+        if (HAL_GPIO_ReadPin(KEY_MODE_GPIO_Port, KEY_MODE_Pin) == GPIO_PIN_RESET)
         {
-            /* SET模式：PA4 减小当前阈值 */
-            if (g_set_state == 0)
+            if (g_work_mode == MODE_SET)
             {
-                if (g_light_threshold <= LIGHT_THR_MIN) g_light_threshold = LIGHT_THR_MAX;
-                else g_light_threshold -= LIGHT_THR_STEP;
+                /* SET模式：PA4 减小当前阈值 */
+                if (g_set_state == 0)
+                {
+                    if (g_light_threshold <= LIGHT_THR_MIN) g_light_threshold = LIGHT_THR_MAX;
+                    else g_light_threshold -= LIGHT_THR_STEP;
+                }
+                else if (g_set_state == 1)
+                {
+                    if (g_temp_threshold <= TEMP_THR_MIN) g_temp_threshold = TEMP_THR_MAX;
+                    else g_temp_threshold -= TEMP_THR_STEP;
+                }
             }
-            else if (g_set_state == 1)
+            else
             {
-                if (g_temp_threshold <= TEMP_THR_MIN) g_temp_threshold = TEMP_THR_MAX;
-                else g_temp_threshold -= TEMP_THR_STEP;
+                g_work_mode = (WorkMode_t)(((int)g_work_mode + 1) % 3);
+                if (g_work_mode == MODE_MANUAL)
+                {
+                    servo_idx = 0;
+                    g_servo_pulse = SERVO_MIN_PULSE;
+                }
+                else if (g_work_mode == MODE_SET)
+                {
+                    g_set_state = 0;
+                }
             }
         }
-        else
-        {
-            g_work_mode = (WorkMode_t)(((int)g_work_mode + 1) % 3);
-            if (g_work_mode == MODE_MANUAL)
-            {
-                servo_idx = 0;
-                g_servo_pulse = SERVO_MIN_PULSE;
-            }
-            else if (g_work_mode == MODE_SET)
-            {
-                g_set_state = 0;
-            }
-        }
+        /* 排空消抖窗口内积累的信号量，避免抖动被计为多次按键 */
+        while (osSemaphoreAcquire(xSem_Key, 0) == osOK) {}
     }
 
     /* ---- KEY_SET (PB12)：轮询边沿检测 ---- */
