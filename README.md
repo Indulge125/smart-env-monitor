@@ -184,8 +184,8 @@ flowchart LR
 5. 打开串口工具查看传感器、DTU 和控制日志。
 
 ```bash
-git clone https://github.com/Indulge125/programfirst.git
-cd programfirst/smart_env_monitor
+git clone https://github.com/Indulge125/smart-env-monitor.git
+cd smart-env-monitor/smart_env_monitor
 ```
 
 ## ✅ 当前完成度
