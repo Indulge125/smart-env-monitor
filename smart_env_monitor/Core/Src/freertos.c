@@ -233,9 +233,10 @@ static void HOST_ProcessRx(void);
 static void IWDG_Init(void);
 static void IWDG_Feed(void);
 
-/* 验证用：向串口发 CRASH 模拟死机，IWDG 约 2s 后自动复位（上板验证看门狗）。
-   验证完成后置 0 关闭。 */
-#define WDT_CRASH_TEST 1
+/* 验证用：向串口发 CRASH 模拟死机，IWDG 约 2s 后自动复位（上板验证看门狗，
+   已于 2026-08-08 两次验证通过）。终版置 0 关闭——测试钩子不进交付固件；
+   需复验时翻回 1 重新编译烧录即可。 */
+#define WDT_CRASH_TEST 0
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
