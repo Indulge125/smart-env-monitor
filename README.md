@@ -57,7 +57,7 @@ Smart Env Monitor 是一个运行在 **STM32F103C8T6** 上的嵌入式环境监�
 | `SensorTask` | AboveNormal | 1000 ms | ADC 采样、16 点滤波、数据换算与调试输出。 |
 | `ControlTask` | AboveNormal | 200 ms | 根据工作模式和阈值控制舵机与 LED。 |
 | `DisplayTask` | Normal | 300 ms | 在状态变化时刷新 OLED，减少重复写入。 |
-| `WifiTask` | BelowNormal | 200 ms | 解析指令、检测连接并按 5 秒周期上报遥测数据。 |
+| `DtuTask` | BelowNormal | 200 ms | 解析指令、检测连接并按 5 秒周期上报遥测数据。 |
 
 任务创建、优先级和核心业务逻辑集中在 [`Core/Src/freertos.c`](smart_env_monitor/Core/Src/freertos.c)。
 

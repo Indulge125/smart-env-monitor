@@ -41,7 +41,22 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* ---- 硬件 / 协议常量：集中定义，避免魔法数字散布 ---- */
+#define ADC_FULL_SCALE   4095  /* ADC 12 位满量程 */
+#define SERVO_MIN_PULSE  500   /* 舵机最小脉宽(μs)，约 0° */
+#define SERVO_MAX_PULSE  2500  /* 舵机最大脉宽(μs)，约 180° */
+#define SERVO_MID_PULSE  1500  /* 舵机中位脉宽(μs)，约 90° */
+#define SERVO_STEP       500   /* 手动模式步进脉宽(μs) */
+#define SERVO_STEPS      5     /* 手动模式档位数量 */
+#define LIGHT_THR_MIN    10    /* 光照阈值下界(%) */
+#define LIGHT_THR_MAX    50    /* 光照阈值上界(%) */
+#define LIGHT_THR_STEP   5     /* 光照阈值步进(%) */
+#define LIGHT_THR_DEFAULT 30   /* 光照阈值初值(%) */
+#define TEMP_THR_MIN     15    /* 温度阈值下界(°C) */
+#define TEMP_THR_MAX     45    /* 温度阈值上界(°C) */
+#define TEMP_THR_STEP    5     /* 温度阈值步进(°C) */
+#define TEMP_THR_DEFAULT 30    /* 温度阈值初值(°C) */
+#define VIN_REPORT_DV    33    /* 供电电压上报(×0.1V)，当前为占位值未实测 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -77,12 +92,12 @@ typedef enum { MODE_AUTO = 0, MODE_MANUAL, MODE_SET } WorkMode_t;
 volatile WorkMode_t g_work_mode = MODE_AUTO;
 
 /* 报警阈值 */
-volatile uint8_t g_light_threshold = 30;  /* 光照阈值(%) */
-volatile uint8_t g_temp_threshold  = 30;  /* 温度阈值(°C) */
+volatile uint8_t g_light_threshold = LIGHT_THR_DEFAULT;  /* 光照阈值(%) */
+volatile uint8_t g_temp_threshold  = TEMP_THR_DEFAULT;   /* 温度阈值(°C) */
 volatile uint8_t g_set_state = 0;         /* SET模式：0=调光照 1=调温度 2=保存退出 */
 
-/* 舵机角度（500~2500 对应 0°~180°） */
-volatile uint16_t g_servo_pulse = 1500;
+/* 舵机脉宽（500~2500 μs 对应约 0°~180°） */
+volatile uint16_t g_servo_pulse = SERVO_MID_PULSE;
 
 /* 信号量（在 MX_FREERTOS_Init 中创建） */
 osSemaphoreId_t xSem_Key;
@@ -92,7 +107,6 @@ const osSemaphoreAttr_t xSem_Key_attr = { .name = "SemKey" };
 static uint8_t dtu_rx_byte;
 static uint8_t dtu_rx_buf[DTU_RX_BUF_SIZE];
 static volatile uint16_t dtu_rx_idx = 0;
-static volatile uint8_t dtu_rx_flag = 0;
 static volatile uint8_t dtu_connected = 0;
 
 #define DTU_USE_RDY_PIN 0
@@ -135,10 +149,10 @@ const osThreadAttr_t ControlTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for WifiTask */
+/* Definitions for DtuTask（任务名与硬件职责一致：驱动 4G DTU） */
 osThreadId_t WifiTaskHandle;
 const osThreadAttr_t WifiTask_attributes = {
-  .name = "WifiTask",
+  .name = "DtuTask",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
@@ -283,8 +297,8 @@ void Task1(void *argument)
     data.temp_raw  = SensorFilter(data.temp_raw,  temp_buf,  &temp_sum);
     filter_idx = (filter_idx + 1) % FILTER_SIZE;
 
-    data.light_pct = 100.0f - ((float)data.light_raw / 4095.0f * 100.0f);
-    data.temp_c = 50.0f - ((float)data.temp_raw / 4095.0f * 50.0f);
+    data.light_pct = 100.0f - ((float)data.light_raw / (float)ADC_FULL_SCALE * 100.0f);
+    data.temp_c = 50.0f - ((float)data.temp_raw / (float)ADC_FULL_SCALE * 50.0f);
 
     g_light_value = data.light_pct;
     g_temp_value  = data.temp_c;
@@ -340,9 +354,9 @@ void Task2(void *argument)
 
             switch (g_set_state)
             {
-                case 0:  OLED_ShowString(3, 1, "+5PB12 PA4-5   "); break;
-                case 1:  OLED_ShowString(3, 1, "+5PB12 PA4-5   "); break;
-                case 2:  OLED_ShowString(3, 1, "PB12:Save&Exit  "); break;
+                case 0:  OLED_ShowString(3, 1, "Set Light Thr  "); break;
+                case 1:  OLED_ShowString(3, 1, "Set Temp Thr   "); break;
+                case 2:  OLED_ShowString(3, 1, "Save&Exit       "); break;
             }
             last_set_state = g_set_state;
             last_lt = g_light_threshold;
@@ -410,12 +424,12 @@ void Task3(void *argument)
         if (light < (float)g_light_threshold)
         {
             HAL_GPIO_WritePin(LED_ALARM_GPIO_Port, LED_ALARM_Pin, GPIO_PIN_RESET);
-            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 2500);
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, SERVO_MAX_PULSE);
         }
         else
         {
             HAL_GPIO_WritePin(LED_ALARM_GPIO_Port, LED_ALARM_Pin, GPIO_PIN_SET);
-            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 500);
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, SERVO_MIN_PULSE);
         }
 
         /* 温度报警：PA7 */
@@ -440,7 +454,7 @@ void Task3(void *argument)
 
 /* USER CODE BEGIN Header_Task4 */
 /**
-* @brief Function implementing the WifiTask thread.
+* @brief Function implementing the DtuTask thread.
 * @param argument: Not used
 * @retval None
 */
@@ -517,13 +531,13 @@ void Task5(void *argument)
             /* SET模式：PA4 减小当前阈值 */
             if (g_set_state == 0)
             {
-                if (g_light_threshold <= 10) g_light_threshold = 50;
-                else g_light_threshold -= 5;
+                if (g_light_threshold <= LIGHT_THR_MIN) g_light_threshold = LIGHT_THR_MAX;
+                else g_light_threshold -= LIGHT_THR_STEP;
             }
             else if (g_set_state == 1)
             {
-                if (g_temp_threshold <= 15) g_temp_threshold = 45;
-                else g_temp_threshold -= 5;
+                if (g_temp_threshold <= TEMP_THR_MIN) g_temp_threshold = TEMP_THR_MAX;
+                else g_temp_threshold -= TEMP_THR_STEP;
             }
         }
         else
@@ -532,7 +546,7 @@ void Task5(void *argument)
             if (g_work_mode == MODE_MANUAL)
             {
                 servo_idx = 0;
-                g_servo_pulse = 500;
+                g_servo_pulse = SERVO_MIN_PULSE;
             }
             else if (g_work_mode == MODE_SET)
             {
@@ -550,20 +564,20 @@ void Task5(void *argument)
         {
             if (g_work_mode == MODE_MANUAL)
             {
-                servo_idx = (servo_idx + 1) % 5;
-                g_servo_pulse = 500 + servo_idx * 500;
+                servo_idx = (servo_idx + 1) % SERVO_STEPS;
+                g_servo_pulse = SERVO_MIN_PULSE + servo_idx * SERVO_STEP;
             }
             else if (g_work_mode == MODE_SET)
             {
                 if (g_set_state == 0)
                 {
-                    g_light_threshold += 5;
-                    if (g_light_threshold > 50) g_light_threshold = 10;
+                    g_light_threshold += LIGHT_THR_STEP;
+                    if (g_light_threshold > LIGHT_THR_MAX) g_light_threshold = LIGHT_THR_MIN;
                 }
                 else if (g_set_state == 1)
                 {
-                    g_temp_threshold += 5;
-                    if (g_temp_threshold > 45) g_temp_threshold = 15;
+                    g_temp_threshold += TEMP_THR_STEP;
+                    if (g_temp_threshold > TEMP_THR_MAX) g_temp_threshold = TEMP_THR_MIN;
                 }
                 else
                 {
@@ -593,7 +607,6 @@ static void DTU_Init(void)
   HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_RESET);
   memset((void *)dtu_rx_buf, 0, sizeof(dtu_rx_buf));
   dtu_rx_idx = 0;
-  dtu_rx_flag = 0;
   HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
 
   const char *msg = "[DTU] init done\r\n";
@@ -628,7 +641,7 @@ static void DTU_SendTelemetry(const char *did, uint8_t debug_log)
   int m = (int)g_work_mode;
   int sw1 = (g_work_mode == MODE_MANUAL) ? 1 : 0;
   int in1 = (g_temp_value > (float)g_temp_threshold) ? 1 : 0;
-  int vin = 33;
+  int vin = VIN_REPORT_DV;
   unsigned long ts = (unsigned long)(HAL_GetTick() / 1000U);
 
   snprintf(json, sizeof(json),
@@ -662,8 +675,8 @@ static void DTU_ParseCommand(const char *cmd)
   else if (strstr(cmd, "SERVO="))
   {
     int pulse = atoi(strstr(cmd, "SERVO=") + 6);
-    if (pulse < 500) pulse = 500;
-    if (pulse > 2500) pulse = 2500;
+    if (pulse < SERVO_MIN_PULSE) pulse = SERVO_MIN_PULSE;
+    if (pulse > SERVO_MAX_PULSE) pulse = SERVO_MAX_PULSE;
     g_servo_pulse = (uint16_t)pulse;
     g_work_mode = MODE_MANUAL;
   }
@@ -698,7 +711,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         dtu_cmd_buf[CMD_BUF_SIZE - 1] = '\0';
         dtu_cmd_ready = 1;
         dtu_rx_idx = 0;
-        dtu_rx_flag = 1;
       }
     }
     else
