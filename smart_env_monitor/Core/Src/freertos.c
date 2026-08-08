@@ -132,6 +132,20 @@ static uint16_t dtu_line_len = 0;
 #define DTU_RX_ECHO 1
 static volatile uint8_t dtu_connected = 0;
 
+/* ---- USART2（调试口）指令通道：同一套环形缓冲 + 行组装，复用 DTU_ParseCommand。
+     一根 USB-TTL 接 PA2/PA3 即可同时看日志 + 发指令；PA9/PA10 保持专属于 DTU，
+     避免两根 TX 打架。命令回显 [HOST] RX: xxx 直接打在调试口，同一窗口可见。 ---- */
+#define HOST_RX_RING_SIZE  DTU_RX_RING_SIZE
+#define HOST_RX_RING_MASK  (HOST_RX_RING_SIZE - 1)
+static uint8_t  host_rx_byte;                    /* HAL_Receive_IT 的目标地址 */
+static volatile uint8_t  host_rx_ring[HOST_RX_RING_SIZE];
+static volatile uint16_t host_rx_head = 0;       /* 生产端（USART2 ISR） */
+static volatile uint16_t host_rx_tail = 0;       /* 消费端（DtuTask） */
+static volatile uint32_t host_rx_overflow = 0;   /* 环满丢字节计数（可观测） */
+static volatile uint32_t host_rx_lines = 0;      /* 已处理命令行计数（可观测） */
+static char host_cmd_line[HOST_RX_RING_SIZE];    /* 任务私有组行缓冲，无竞争 */
+static uint16_t host_line_len = 0;
+
 #define DTU_USE_RDY_PIN 0
 #define DTU_REPORT_INTERVAL 5000
 #define DTU_DISCONNECT_LIMIT 2
@@ -205,6 +219,8 @@ static void DTU_SendData(const char *data);
 static void DTU_SendTelemetry(const char *did, uint8_t debug_log);
 static void DTU_ParseCommand(const char *cmd);
 static void DTU_ProcessRx(void);
+static void HOST_Init(void);
+static void HOST_ProcessRx(void);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -506,20 +522,23 @@ void Task4(void *argument)
   uint32_t last_rx_stat = 0;
 
   DTU_Init();
+  HOST_Init();
   dtu_connected = DTU_IsConnected();
 
   for (;;)
   {
     DTU_ProcessRx();
+    HOST_ProcessRx();
 
     /* 每 10s 打印命令接收统计：连续下发指令后核对 lines 递增、overflow=0，
        是环形缓冲"不丢帧"的板上可观测证据 */
     if ((HAL_GetTick() - last_rx_stat) >= 10000)
     {
-      char stat[128];
+      char stat[160];
       snprintf(stat, sizeof(stat),
-               "[DTU] RX lines=%lu overflow=%lu\r\n",
-               (unsigned long)dtu_rx_lines, (unsigned long)dtu_rx_overflow);
+               "[DTU] RX lines=%lu overflow=%lu | [HOST] RX lines=%lu overflow=%lu\r\n",
+               (unsigned long)dtu_rx_lines, (unsigned long)dtu_rx_overflow,
+               (unsigned long)host_rx_lines, (unsigned long)host_rx_overflow);
       UART2_Print(stat);
       last_rx_stat = HAL_GetTick();
     }
@@ -840,6 +859,55 @@ static void DTU_ProcessRx(void)
   }
 }
 
+/* USART2（调试口）指令通道初始化：清零计数并挂起单字节中断接收 */
+static void HOST_Init(void)
+{
+  host_rx_head = 0;
+  host_rx_tail = 0;
+  host_rx_overflow = 0;
+  host_rx_lines = 0;
+  host_line_len = 0;
+  if (HAL_UART_Receive_IT(&huart2, &host_rx_byte, 1) != HAL_OK)
+  {
+    UART2_Print("[ERR] USART2 RX arm failed\r\n");
+  }
+}
+
+/* 消费 USART2 环形缓冲并组装命令行：与 DTU 通道同构，命令解析复用。
+   回显 [HOST] RX: xxx 直接打在调试口——同一窗口可见，无需换线。 */
+static void HOST_ProcessRx(void)
+{
+  while (host_rx_tail != host_rx_head)
+  {
+    uint8_t ch = host_rx_ring[host_rx_tail];
+    host_rx_tail = (uint16_t)((host_rx_tail + 1) & HOST_RX_RING_MASK);
+
+    if (ch == '\n' || ch == '\r')
+    {
+      if (host_line_len > 0)
+      {
+        host_cmd_line[host_line_len] = '\0';
+        UART2_Print("[HOST] RX: ");
+        UART2_Print(host_cmd_line);
+        UART2_Print("\r\n");
+        DTU_ParseCommand(host_cmd_line);
+        host_rx_lines++;
+        host_line_len = 0;
+      }
+      continue;
+    }
+
+    if (host_line_len < sizeof(host_cmd_line) - 1)
+    {
+      host_cmd_line[host_line_len++] = (char)ch;
+    }
+    else
+    {
+      host_line_len = 0;   /* 超长：丢弃整行，不解析半帧 */
+    }
+  }
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
@@ -856,6 +924,21 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 
     HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
+  }
+  else if (huart->Instance == USART2)
+  {
+    uint16_t next = (uint16_t)((host_rx_head + 1) & HOST_RX_RING_MASK);
+    if (next != host_rx_tail)
+    {
+      host_rx_ring[host_rx_head] = host_rx_byte;
+      host_rx_head = next;
+    }
+    else
+    {
+      host_rx_overflow++;   /* 环满：丢新字节并计数 */
+    }
+
+    HAL_UART_Receive_IT(&huart2, &host_rx_byte, 1);
   }
 }
 
