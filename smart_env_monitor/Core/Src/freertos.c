@@ -121,6 +121,7 @@ static volatile uint16_t dtu_rx_head = 0;       /* 生产端（ISR） */
 static volatile uint16_t dtu_rx_tail = 0;       /* 消费端（DtuTask） */
 static volatile uint32_t dtu_rx_overflow = 0;   /* 环满丢字节计数（可观测） */
 static volatile uint32_t dtu_rx_lines = 0;      /* 已处理命令行计数（可观测） */
+static volatile uint32_t dtu_rx_arm_fail = 0;   /* ISR 重挂 Receive_IT 失败计数 */
 static char dtu_cmd_line[DTU_RX_RING_SIZE];     /* 任务私有组行缓冲，无竞争 */
 static uint16_t dtu_line_len = 0;
 
@@ -143,6 +144,7 @@ static volatile uint16_t host_rx_head = 0;       /* 生产端（USART2 ISR） */
 static volatile uint16_t host_rx_tail = 0;       /* 消费端（DtuTask） */
 static volatile uint32_t host_rx_overflow = 0;   /* 环满丢字节计数（可观测） */
 static volatile uint32_t host_rx_lines = 0;      /* 已处理命令行计数（可观测） */
+static volatile uint32_t host_rx_arm_fail = 0;   /* ISR 重挂 Receive_IT 失败计数 */
 static char host_cmd_line[HOST_RX_RING_SIZE];    /* 任务私有组行缓冲，无竞争 */
 static uint16_t host_line_len = 0;
 
@@ -542,11 +544,14 @@ void Task4(void *argument)
        是环形缓冲"不丢帧"的板上可观测证据 */
     if ((HAL_GetTick() - last_rx_stat) >= 10000)
     {
-      char stat[160];
+      char stat[200];
       snprintf(stat, sizeof(stat),
-               "[DTU] RX lines=%lu overflow=%lu | [HOST] RX lines=%lu overflow=%lu\r\n",
+               "[DTU] RX lines=%lu overflow=%lu arm_fail=%lu | "
+               "[HOST] RX lines=%lu overflow=%lu arm_fail=%lu\r\n",
                (unsigned long)dtu_rx_lines, (unsigned long)dtu_rx_overflow,
-               (unsigned long)host_rx_lines, (unsigned long)host_rx_overflow);
+               (unsigned long)dtu_rx_arm_fail,
+               (unsigned long)host_rx_lines, (unsigned long)host_rx_overflow,
+               (unsigned long)host_rx_arm_fail);
       UART2_Print(stat);
       last_rx_stat = HAL_GetTick();
     }
@@ -725,6 +730,7 @@ static void DTU_Init(void)
   dtu_rx_tail = 0;
   dtu_rx_overflow = 0;
   dtu_rx_lines = 0;
+  dtu_rx_arm_fail = 0;
   dtu_line_len = 0;
   if (HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1) != HAL_OK)
   {
@@ -884,6 +890,7 @@ static void HOST_Init(void)
   host_rx_tail = 0;
   host_rx_overflow = 0;
   host_rx_lines = 0;
+  host_rx_arm_fail = 0;
   host_line_len = 0;
   if (HAL_UART_Receive_IT(&huart2, &host_rx_byte, 1) != HAL_OK)
   {
@@ -966,7 +973,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       dtu_rx_overflow++;   /* 环满：丢新字节并计数，不再静默覆盖旧命令 */
     }
 
-    HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
+    if (HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1) != HAL_OK)
+    {
+      dtu_rx_arm_fail++;   /* 重挂失败：接收将静默停止，必须可观测 */
+    }
   }
   else if (huart->Instance == USART2)
   {
@@ -981,7 +991,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       host_rx_overflow++;   /* 环满：丢新字节并计数 */
     }
 
-    HAL_UART_Receive_IT(&huart2, &host_rx_byte, 1);
+    if (HAL_UART_Receive_IT(&huart2, &host_rx_byte, 1) != HAL_OK)
+    {
+      host_rx_arm_fail++;   /* 重挂失败：接收将静默停止，必须可观测 */
+    }
   }
 }
 
