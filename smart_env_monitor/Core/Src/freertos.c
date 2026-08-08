@@ -108,17 +108,24 @@ const osSemaphoreAttr_t xSem_Key_attr = { .name = "SemKey" };
 osMutexId_t xHuart2Mutex;
 const osMutexAttr_t xHuart2Mutex_attr = { .name = "Huart2Mutex" };
 
-#define DTU_RX_BUF_SIZE 256
-static uint8_t dtu_rx_byte;
-static uint8_t dtu_rx_buf[DTU_RX_BUF_SIZE];
-static volatile uint16_t dtu_rx_idx = 0;
+/* ---- USART1（DTU）命令接收：环形缓冲，ISR 只写字节，DtuTask 组行消费。
+     旧固定单缓冲的缺陷：① 连续两条指令到达时，第二条的 strncpy 会覆盖
+     尚未被消费的第一条（丢命令）；② ISR 内做 256B strncpy 过长；
+     ③ 缓冲满时静默清零，整帧丢弃无痕迹；④ 共享命令缓冲无 volatile。
+     环形缓冲后：连续指令不丢帧、ISR 仅做几个字节的存取、溢出计数可观测。 ---- */
+#define DTU_RX_RING_SIZE  256   /* 2 的幂，取模退化为掩码 */
+#define DTU_RX_RING_MASK  (DTU_RX_RING_SIZE - 1)
+static uint8_t  dtu_rx_byte;                    /* HAL_Receive_IT 的目标地址 */
+static volatile uint8_t  dtu_rx_ring[DTU_RX_RING_SIZE];  /* ISR 写、任务读 */
+static volatile uint16_t dtu_rx_head = 0;       /* 生产端（ISR） */
+static volatile uint16_t dtu_rx_tail = 0;       /* 消费端（DtuTask） */
+static volatile uint32_t dtu_rx_overflow = 0;   /* 环满丢字节计数（可观测） */
+static volatile uint32_t dtu_rx_lines = 0;      /* 已处理命令行计数（可观测） */
+static char dtu_cmd_line[DTU_RX_RING_SIZE];     /* 任务私有组行缓冲，无竞争 */
+static uint16_t dtu_line_len = 0;
 static volatile uint8_t dtu_connected = 0;
 
 #define DTU_USE_RDY_PIN 0
-#define CMD_BUF_SIZE 256
-static char dtu_cmd_buf[CMD_BUF_SIZE];
-static volatile uint8_t dtu_cmd_ready = 0;
-
 #define DTU_REPORT_INTERVAL 5000
 #define DTU_DISCONNECT_LIMIT 2
 #define DTU_RST_HOLD_MS 1200
@@ -190,6 +197,7 @@ static uint8_t DTU_IsConnected(void);
 static void DTU_SendData(const char *data);
 static void DTU_SendTelemetry(const char *did, uint8_t debug_log);
 static void DTU_ParseCommand(const char *cmd);
+static void DTU_ProcessRx(void);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -488,16 +496,25 @@ void Task4(void *argument)
 {
   /* USER CODE BEGIN Task4 */
   uint32_t last_report = 0;
+  uint32_t last_rx_stat = 0;
 
   DTU_Init();
   dtu_connected = DTU_IsConnected();
 
   for (;;)
   {
-    if (dtu_cmd_ready)
+    DTU_ProcessRx();
+
+    /* 每 10s 打印命令接收统计：连续下发指令后核对 lines 递增、overflow=0，
+       是环形缓冲"不丢帧"的板上可观测证据 */
+    if ((HAL_GetTick() - last_rx_stat) >= 10000)
     {
-      dtu_cmd_ready = 0;
-      DTU_ParseCommand(dtu_cmd_buf);
+      char stat[128];
+      snprintf(stat, sizeof(stat),
+               "[DTU] RX lines=%lu overflow=%lu\r\n",
+               (unsigned long)dtu_rx_lines, (unsigned long)dtu_rx_overflow);
+      UART2_Print(stat);
+      last_rx_stat = HAL_GetTick();
     }
 
     dtu_connected = DTU_IsConnected();
@@ -670,8 +687,11 @@ static void PrintStackWatermarks(void)
 static void DTU_Init(void)
 {
   HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_RESET);
-  memset((void *)dtu_rx_buf, 0, sizeof(dtu_rx_buf));
-  dtu_rx_idx = 0;
+  dtu_rx_head = 0;
+  dtu_rx_tail = 0;
+  dtu_rx_overflow = 0;
+  dtu_rx_lines = 0;
+  dtu_line_len = 0;
   if (HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1) != HAL_OK)
   {
     UART2_Print("[ERR] USART1 RX arm failed\r\n");
@@ -774,31 +794,51 @@ static void DTU_ParseCommand(const char *cmd)
   }
 }
 
+/* 消费 USART1 环形缓冲并组装命令行：任务私有缓冲，ISR 只写环。
+   \n 或 \r 视为行结束；空行忽略；超长行整行丢弃（防半帧假命令）。 */
+static void DTU_ProcessRx(void)
+{
+  while (dtu_rx_tail != dtu_rx_head)
+  {
+    uint8_t ch = dtu_rx_ring[dtu_rx_tail];
+    dtu_rx_tail = (uint16_t)((dtu_rx_tail + 1) & DTU_RX_RING_MASK);
+
+    if (ch == '\n' || ch == '\r')
+    {
+      if (dtu_line_len > 0)
+      {
+        dtu_cmd_line[dtu_line_len] = '\0';
+        DTU_ParseCommand(dtu_cmd_line);
+        dtu_rx_lines++;
+        dtu_line_len = 0;
+      }
+      continue;
+    }
+
+    if (dtu_line_len < sizeof(dtu_cmd_line) - 1)
+    {
+      dtu_cmd_line[dtu_line_len++] = (char)ch;
+    }
+    else
+    {
+      dtu_line_len = 0;   /* 超长：丢弃整行，不解析半帧 */
+    }
+  }
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
-    if (dtu_rx_byte == '\n' || dtu_rx_byte == '\r')
+    uint16_t next = (uint16_t)((dtu_rx_head + 1) & DTU_RX_RING_MASK);
+    if (next != dtu_rx_tail)
     {
-      if (dtu_rx_idx > 0)
-      {
-        dtu_rx_buf[dtu_rx_idx] = '\0';
-        strncpy(dtu_cmd_buf, (char *)dtu_rx_buf, CMD_BUF_SIZE - 1);
-        dtu_cmd_buf[CMD_BUF_SIZE - 1] = '\0';
-        dtu_cmd_ready = 1;
-        dtu_rx_idx = 0;
-      }
+      dtu_rx_ring[dtu_rx_head] = dtu_rx_byte;
+      dtu_rx_head = next;
     }
     else
     {
-      if (dtu_rx_idx < DTU_RX_BUF_SIZE - 1)
-      {
-        dtu_rx_buf[dtu_rx_idx++] = dtu_rx_byte;
-      }
-      else
-      {
-        dtu_rx_idx = 0;
-      }
+      dtu_rx_overflow++;   /* 环满：丢新字节并计数，不再静默覆盖旧命令 */
     }
 
     HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
