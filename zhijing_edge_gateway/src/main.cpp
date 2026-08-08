@@ -8,9 +8,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -38,6 +40,16 @@ struct MqttConfig {
 
 /* 设备标识，默认 device001；可用 --device-id 覆盖 */
 static std::string g_deviceId = "device001";
+
+/* 在线判定窗口：板端 5s 上报一次，超过 3 个周期（15s）没新数据视为掉线 */
+static constexpr long long kOnlineFreshMs = 15000;
+
+static long long currentTimeMs();   /* 前向声明：SensorStore 新鲜度判定用 */
+
+/* 新鲜度判定：超过 kOnlineFreshMs 未收到新上报即视为掉线（纯函数，可单测） */
+static bool isStale(const SensorData& data, long long nowMs) {
+    return nowMs - data.timestampMs > kOnlineFreshMs;
+}
 
 static std::string sensorDataToJson(const SensorData& data, bool includeOnline) {
     std::ostringstream out;
@@ -71,6 +83,9 @@ public:
         if (!latest_) {
             return R"({"online":false,"message":"等待传感器数据"})";
         }
+        if (isStale(*latest_, currentTimeMs())) {
+            return staleJson(*latest_);
+        }
         return dataToJson(*latest_, true);
     }
 
@@ -91,6 +106,21 @@ public:
 private:
     static std::string dataToJson(const SensorData& data, bool includeOnline) {
         return sensorDataToJson(data, includeOnline);
+    }
+
+    /* 数据超时（设备掉线）时的诚实表达：online:false + stale:true，
+       仍附最后已知值，供 API 调用方做降级展示 */
+    static std::string staleJson(const SensorData& data) {
+        std::ostringstream out;
+        out << R"({"online":false,"stale":true,)"
+            << R"("deviceId":")" << g_deviceId << R"(",)"
+            << R"("temp":)" << data.temp << ","
+            << R"("light":)" << data.light << ","
+            << R"("mode":)" << data.mode << ","
+            << R"("servo":)" << data.servo << ","
+            << R"("ts":)" << data.timestampMs
+            << R"(,"message":"数据超时：超过15秒未收到新上报"})";
+        return out.str();
     }
 
     mutable std::mutex mutex_;
@@ -248,12 +278,104 @@ static bool connectWithTimeout(SOCKET s, const sockaddr* addr, int addrLen, DWOR
     return true;
 }
 
+/* MQTT 失败日志限频：broker 长时间不可达时不刷屏（10s 最多一条） */
+static std::atomic<long long> g_lastMqttErrorLogMs{0};
+static constexpr long long kMqttErrorLogIntervalMs = 10000;
+
+static void logMqttErrorRateLimited(const std::string& message) {
+    const long long now = currentTimeMs();
+    long long last = g_lastMqttErrorLogMs.load(std::memory_order_relaxed);
+    if (now - last < kMqttErrorLogIntervalMs) {
+        return;
+    }
+    if (g_lastMqttErrorLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        std::cerr << message << "\n";
+    }
+}
+
+/* 发布队列上限：满时丢最旧保留最新——遥测只需要最新值 */
+static constexpr size_t kMqttQueueMax = 32;
+
+/* MQTT 发布跑在独立线程：串口采集线程只入队，绝不被 broker 阻塞。
+   broker 不可达时，串口读取、Web 展示完全不受影响（历史问题：
+   publish 在采集循环里同步调用，连接失败一次就卡 5s，串口缓冲溢出丢数据）。 */
 class MqttPublisher {
 public:
-    explicit MqttPublisher(MqttConfig config) : config_(std::move(config)) {}
+    explicit MqttPublisher(MqttConfig config) : config_(std::move(config)) {
+        worker_ = std::thread(&MqttPublisher::workerLoop, this);
+    }
 
     ~MqttPublisher() {
-        close();
+        stop();
+    }
+
+    /* 异步发布：入队即返回，永不阻塞调用方 */
+    void publish(const SensorData& data) {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            if (queue_.size() >= kMqttQueueMax) {
+                queue_.pop_front();
+            }
+            queue_.push_back(data);
+        }
+        queueCv_.notify_one();
+    }
+
+    /* 同步发布（--demo-mqtt 验证用）：阻塞到出结果 */
+    bool publishSync(const SensorData& data) {
+        return publishToBroker(data);
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            stop_ = true;
+        }
+        queueCv_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();   /* 即使正在 connect（最长 5s），join 也有界 */
+        }
+    }
+
+private:
+    void workerLoop() {
+        for (;;) {
+            SensorData item;
+            {
+                std::unique_lock<std::mutex> lock(queueMutex_);
+                queueCv_.wait_for(lock, std::chrono::seconds(1), [this] {
+                    return stop_ || !queue_.empty();
+                });
+                if (queue_.empty()) {
+                    if (stop_) {
+                        return;
+                    }
+                    continue;   /* 超时唤醒，继续等待 */
+                }
+                item = queue_.front();
+                queue_.pop_front();
+            }
+            publishToBroker(item);
+        }
+    }
+
+    bool publishToBroker(const SensorData& data) {
+        if (!connectBroker()) {
+            logMqttErrorRateLimited("MQTT 连接失败（" + config_.host + ":" +
+                                    std::to_string(config_.port) + "），下一条数据到来时自动重试");
+            return false;
+        }
+
+        const std::string payload = sensorDataToJson(data, false);
+        const auto packet = makeMqttPublishPacket(config_.topic, payload);
+        if (!sendBytes(socket_, packet)) {
+            logMqttErrorRateLimited("MQTT PUBLISH 发送失败，将自动重连");
+            close();
+            return false;
+        }
+
+        std::cout << "MQTT publish: " << payload << "\n";
+        return true;
     }
 
     bool connectBroker() {
@@ -262,7 +384,6 @@ public:
         }
 
         if (WSAStartup(MAKEWORD(2, 2), &wsaData_) != 0) {
-            std::cerr << "MQTT WSAStartup failed.\n";
             return false;
         }
         wsaStarted_ = true;
@@ -275,7 +396,6 @@ public:
         addrinfo* result = nullptr;
         const std::string portText = std::to_string(config_.port);
         if (getaddrinfo(config_.host.c_str(), portText.c_str(), &hints, &result) != 0) {
-            std::cerr << "MQTT getaddrinfo failed: " << config_.host << "\n";
             close();
             return false;
         }
@@ -296,7 +416,6 @@ public:
         freeaddrinfo(result);
 
         if (socket_ == INVALID_SOCKET) {
-            std::cerr << "MQTT connect failed: " << config_.host << ":" << config_.port << "\n";
             close();
             return false;
         }
@@ -306,7 +425,6 @@ public:
 
         const auto packet = makeMqttConnectPacket(config_.clientId, 60);
         if (!sendBytes(socket_, packet)) {
-            std::cerr << "MQTT CONNECT send failed.\n";
             close();
             return false;
         }
@@ -314,7 +432,6 @@ public:
         uint8_t ack[4]{};
         const int received = recv(socket_, reinterpret_cast<char*>(ack), sizeof(ack), 0);
         if (received < 4 || ack[0] != 0x20 || ack[1] != 0x02 || ack[3] != 0x00) {
-            std::cerr << "MQTT CONNACK failed.\n";
             close();
             return false;
         }
@@ -325,24 +442,6 @@ public:
         return true;
     }
 
-    bool publish(const SensorData& data) {
-        if (!connectBroker()) {
-            return false;
-        }
-
-        const std::string payload = sensorDataToJson(data, false);
-        const auto packet = makeMqttPublishPacket(config_.topic, payload);
-        if (!sendBytes(socket_, packet)) {
-            std::cerr << "MQTT PUBLISH failed. Will reconnect on next data.\n";
-            close();
-            return false;
-        }
-
-        std::cout << "MQTT publish: " << payload << "\n";
-        return true;
-    }
-
-private:
     void close() {
         connected_ = false;
         if (socket_ != INVALID_SOCKET) {
@@ -360,6 +459,12 @@ private:
     SOCKET socket_ = INVALID_SOCKET;
     bool wsaStarted_ = false;
     bool connected_ = false;
+
+    std::thread worker_;
+    std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::deque<SensorData> queue_;
+    bool stop_ = false;
 };
 
 static std::optional<int> parseIntField(const std::string& json, const std::string& name) {
@@ -825,25 +930,38 @@ static std::string dashboardHtml() {
       const canvas = ids.chart;
       const ctx = canvas.getContext('2d');
       const w = canvas.width, h = canvas.height;
+      const plotH = h - 56;
       ctx.clearRect(0, 0, w, h);
       ctx.strokeStyle = '#d8e2ec';
       ctx.lineWidth = 1;
       ctx.font = '14px Microsoft YaHei';
       ctx.fillStyle = '#718096';
+      ctx.textAlign = 'left';
       for (let i = 0; i <= 4; i++) {
-        const y = 28 + i * ((h - 56) / 4);
+        const y = 28 + i * (plotH / 4);
         ctx.beginPath(); ctx.moveTo(46, y); ctx.lineTo(w - 20, y); ctx.stroke();
         ctx.fillText(String(100 - i * 25), 12, y + 4);
       }
+      // 右轴：温度 0-50（板端温度映射范围）。温度与光照量纲不同，
+      // 若共用左轴 0-100，30℃ 会显示在 60% 高度，视觉上严重误导。
+      ctx.fillStyle = '#9aa9bb';
+      for (let i = 0; i <= 5; i++) {
+        const y = 28 + i * (plotH / 5);
+        ctx.beginPath(); ctx.moveTo(w - 20, y); ctx.lineTo(w - 26, y); ctx.stroke();
+        ctx.textAlign = 'right';
+        ctx.fillText(String(50 - i * 10), w - 30, y + 4);
+      }
+      ctx.textAlign = 'left';
       ctx.fillStyle = '#7b8ca3';
-      ctx.fillText('数值范围（0 - 100）', 46, 18);
+      ctx.fillText('左轴光照 0-100 · 右轴温度 0-50', 46, 18);
       if (!items.length) {
         ctx.fillText('等待真实传感器数据上报', 56, 52);
         return;
       }
       const xOf = (i) => 46 + i * ((w - 76) / Math.max(items.length - 1, 1));
-      const yOf = (v) => 28 + (100 - Math.max(0, Math.min(100, v))) * ((h - 56) / 100);
-      function line(field, color) {
+      const yOfLight = (v) => 28 + (100 - Math.max(0, Math.min(100, v))) * (plotH / 100);
+      const yOfTemp = (v) => 28 + (50 - Math.max(0, Math.min(50, v))) * (plotH / 50);
+      function line(field, color, yOf) {
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -853,14 +971,14 @@ static std::string dashboardHtml() {
         });
         ctx.stroke();
       }
-      line('temp', '#df3f4a');
-      line('light', '#dd8b00');
+      line('light', '#dd8b00', yOfLight);
+      line('temp', '#df3f4a', yOfTemp);
       ctx.fillStyle = '#df3f4a';
-      ctx.beginPath(); ctx.arc(w - 150, 24, 6, 0, Math.PI * 2); ctx.fill();
-      ctx.fillText('温度', w - 138, 29);
+      ctx.beginPath(); ctx.arc(w - 190, 24, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillText('温度(右轴)', w - 178, 29);
       ctx.fillStyle = '#dd8b00';
-      ctx.beginPath(); ctx.arc(w - 82, 24, 6, 0, Math.PI * 2); ctx.fill();
-      ctx.fillText('光照', w - 70, 29);
+      ctx.beginPath(); ctx.arc(w - 106, 24, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillText('光照(左轴)', w - 94, 29);
     }
 
     async function refresh() {
@@ -879,7 +997,7 @@ static std::string dashboardHtml() {
           ids.servo.textContent = latest.servo;
           ids.updated.textContent = '最近更新：' + timeText(latest.ts);
         } else {
-          ids.online.textContent = '等待数据';
+          ids.online.textContent = latest.stale ? '数据超时' : '等待数据';
           ids.online.className = 'pill offline';
           ids.updated.textContent = latest.message ? ('状态说明：' + latest.message) : '最近更新：--';
           ids.temp.textContent = '--';
@@ -1087,6 +1205,10 @@ static int runSerialMode(const std::string& portName, DWORD baudRate, const std:
 
     std::string line;
     while (true) {
+        if (!g_running) {
+            break;   /* Ctrl+C：ReadFile 最多 50ms 返回一次，退出有界 */
+        }
+
         char ch = 0;
         DWORD bytesRead = 0;
         if (!ReadFile(port, &ch, 1, &bytesRead, nullptr)) {
@@ -1108,7 +1230,7 @@ static int runSerialMode(const std::string& portName, DWORD baudRate, const std:
                 g_store.update(*data);
                 printSensorData(*data);
                 if (mqtt) {
-                    mqtt->publish(*data);
+                    mqtt->publish(*data);   /* 只入队，不等待 broker */
                 }
             }
             line.clear();
@@ -1120,6 +1242,10 @@ static int runSerialMode(const std::string& portName, DWORD baudRate, const std:
             line.clear();
         }
     }
+
+    CloseHandle(port);
+    std::cout << "Stopped.\n";
+    return 0;
 }
 
 static int runDemoMode() {
@@ -1155,6 +1281,15 @@ static int runSelfTest() {
         return 1;
     }
 
+    /* 在线状态新鲜度：刚更新的数据不算掉线，20s 前的旧数据必须判定为掉线 */
+    const auto freshNow = currentTimeMs();
+    const SensorData freshData{74, 27.0f, 0, 1500, freshNow};
+    const SensorData oldData{74, 27.0f, 0, 1500, freshNow - 20000};
+    if (isStale(freshData, freshNow) || !isStale(oldData, freshNow)) {
+        std::cerr << "freshness self-test failed.\n";
+        return 1;
+    }
+
     const auto encoded128 = encodeMqttRemainingLength(128);
     if (encoded128 != std::vector<uint8_t>{0x80, 0x01}) {
         std::cerr << "mqtt remaining length self-test failed.\n";
@@ -1187,6 +1322,9 @@ static int runDemoWeb(unsigned short port) {
     int light = 45;
     int temp = 26;
     while (true) {
+        if (!g_running) {
+            break;
+        }
         light += 7;
         if (light > 92) {
             light = 38;
@@ -1197,13 +1335,14 @@ static int runDemoWeb(unsigned short port) {
         printSensorData(data);
         Sleep(5000);
     }
+    return 0;
 }
 
 static int runDemoMqtt(const MqttConfig& mqttConfig) {
     MqttPublisher mqtt(mqttConfig);
     SensorData data{74, 27.0f, 0, 1500, currentTimeMs()};
     printSensorData(data);
-    return mqtt.publish(data) ? 0 : 1;
+    return mqtt.publishSync(data) ? 0 : 1;   /* 验证模式用同步发布，直接看结果 */
 }
 
 static std::optional<unsigned short> parsePort(const char* text) {
