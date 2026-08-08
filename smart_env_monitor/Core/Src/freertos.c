@@ -221,6 +221,12 @@ static void DTU_ParseCommand(const char *cmd);
 static void DTU_ProcessRx(void);
 static void HOST_Init(void);
 static void HOST_ProcessRx(void);
+static void IWDG_Init(void);
+static void IWDG_Feed(void);
+
+/* 验证用：向串口发 CRASH 模拟死机，IWDG 约 2s 后自动复位（上板验证看门狗）。
+   验证完成后置 0 关闭。 */
+#define WDT_CRASH_TEST 1
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -523,10 +529,12 @@ void Task4(void *argument)
 
   DTU_Init();
   HOST_Init();
+  IWDG_Init();   /* 看门狗最后挂载：此后任何死循环/任务饿死都触发硬件复位 */
   dtu_connected = DTU_IsConnected();
 
   for (;;)
   {
+    IWDG_Feed();   /* 喂狗：200ms 周期 << 2s 超时，留足 10 倍余量 */
     DTU_ProcessRx();
     HOST_ProcessRx();
 
@@ -818,6 +826,16 @@ static void DTU_ParseCommand(const char *cmd)
   {
     HAL_GPIO_WritePin(LED_ALARM_GPIO_Port, LED_ALARM_Pin, GPIO_PIN_SET);
   }
+#if WDT_CRASH_TEST
+  else if (strstr(cmd, "CRASH"))
+  {
+    UART2_Print("[WDT] deliberate crash, IWDG resets in ~2s\r\n");
+    __disable_irq();
+    while (1)
+    {
+    }
+  }
+#endif
 }
 
 /* 消费 USART1 环形缓冲并组装命令行：任务私有缓冲，ISR 只写环。
@@ -906,6 +924,31 @@ static void HOST_ProcessRx(void)
       host_line_len = 0;   /* 超长：丢弃整行，不解析半帧 */
     }
   }
+}
+
+/* ---- IWDG 看门狗：LSI 独立时钟驱动，不复位、不失效；任何任务死循环/饿死
+     超过超时即硬件复位（取代 Error_Handler 的 while(1) 永久死等）。
+     寄存器级实现（F1 HAL 的 IWDG 模块未启用）：
+     KR=0x5555 解锁 → 写 PR/RLR → KR=0xAAAA 重装 → KR=0xCCCC 启动；喂狗写 KR=0xAAAA。
+     超时 = (PR=64 ÷ LSI 40kHz) × RLR=1250 ≈ 2s（LSI 实际 30~60kHz，约 1.5~3s）。 ---- */
+static void IWDG_Init(void)
+{
+  __HAL_RCC_LSI_ENABLE();
+  while ((RCC->CSR & RCC_CSR_LSIRDY) == 0U)
+  {
+  }
+
+  IWDG->KR = 0x5555U;   /* 解锁写保护 */
+  IWDG->PR = 0x4U;      /* 预分频 /64 → 1.6ms/计数（40kHz 标称） */
+  IWDG->RLR = 1250U;    /* 约 2s 超时 */
+  IWDG->KR = 0xAAAAU;   /* 装载重载值 */
+  IWDG->KR = 0xCCCCU;   /* 启动 */
+  UART2_Print("[WDT] IWDG armed, ~2s timeout\r\n");
+}
+
+static void IWDG_Feed(void)
+{
+  IWDG->KR = 0xAAAAU;   /* 重新装载计数器 */
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)

@@ -241,7 +241,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* 打印故障原因后挂起，等 IWDG（约 2s 超时）硬件复位——不再永久死机。
+     注意：USART2 未初始化时 gState 为 RESET，跳过打印直接等待复位；
+     看门狗未挂载前（上电早期）的行为与旧版一致（死等）。 */
+  {
+    char msg[] = "[ERR] HAL error, IWDG resets in ~2s\r\n";
+    if (huart2.gState == HAL_UART_STATE_READY)
+    {
+      HAL_UART_Transmit(&huart2, (uint8_t *)msg, sizeof(msg) - 1, 100);
+    }
+  }
   __disable_irq();
   while (1)
   {
