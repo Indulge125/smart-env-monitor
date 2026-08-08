@@ -13,7 +13,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 不指定 -G：windows-latest 的 VS 版本会随 runner 更新，显式写 2022 会
       # 在装新版 VS 的 runner 上找不到实例；让 CMake 自动选最高版本
