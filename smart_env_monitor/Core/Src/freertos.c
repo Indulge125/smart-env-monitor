@@ -58,6 +58,15 @@
 #define TEMP_THR_DEFAULT 30    /* 温度阈值初值(°C) */
 #define VIN_REPORT_DV    33    /* 供电电压上报(×0.1V)，当前为占位值未实测 */
 #define KEY_DEBOUNCE_MS  30    /* KEY_MODE 消抖窗口(ms)，与 KEY_SET 轮询消抖一致 */
+#define KEY_POLL_MS      20    /* KeyTask 轮询周期(ms) */
+#define SENSOR_SAMPLE_MS 1000  /* 传感器采样周期(ms)：1s 采样，5s 汇总上报 */
+#define CONTROL_PERIOD_MS 200  /* ControlTask 报警控制周期(ms) */
+#define DTU_TASK_PERIOD_MS 200 /* DtuTask 主循环周期(ms)，兼作 IWDG 喂狗间隔 */
+#define DISPLAY_REFRESH_MS 300 /* DisplayTask OLED 刷新周期(ms) */
+#define DISPLAY_INIT_HOLD_MS 100 /* OLED 初始化后等待(ms) */
+#define RX_STATS_INTERVAL_MS 10000 /* 命令接收统计打印周期(ms) */
+#define LIGHT_MAP_MAX_PCT 100.0f  /* 光照百分比线性映射上界(%) */
+#define TEMP_MAP_MAX_C    50.0f   /* 温度线性映射上界(°C)：未标定，仅 ADC 线性估计（见 README 已知限制） */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -90,6 +99,7 @@ static uint8_t filter_cnt = 0;
 
 /* 系统工作模式 */
 typedef enum { MODE_AUTO = 0, MODE_MANUAL, MODE_SET } WorkMode_t;
+#define WORK_MODE_COUNT ((int)MODE_SET + 1)  /* 模式总数，按键循环切换取模用 */
 volatile WorkMode_t g_work_mode = MODE_AUTO;
 
 /* 报警阈值 */
@@ -125,13 +135,12 @@ static volatile uint32_t dtu_rx_arm_fail = 0;   /* ISR 重挂 Receive_IT 失败�
 static char dtu_cmd_line[DTU_RX_RING_SIZE];     /* 任务私有组行缓冲，无竞争 */
 static uint16_t dtu_line_len = 0;
 
-/* 收到指令的双重回显（验证用）：
+/* 收到指令的回显（验证用）：2026-08-08 连续下发 4 条指令验证通过
+   （lines=4 overflow=0），已置 0 关闭。重新验证 PA9/PA10 接线时置 1：
    ① 打到调试口 [DTU] RX: xxx；
-   ② 原样回发 USART1(PA9)——串口助手 RX 接 PA9 时能直接看到自己发的
-      指令弹回来，证明 助手TX→PA10 与 PA9→助手RX 双向链路都通。
-   验证完成后置 0 关闭。 */
-#define DTU_RX_ECHO 1
-static volatile uint8_t dtu_connected = 0;
+   ② 原样回发 USART1(PA9)，助手 RX 接 PA9 时直接看到指令弹回来，
+      证明 助手TX→PA10 与 PA9→助手RX 双向链路都通。 */
+#define DTU_RX_ECHO 0
 
 /* ---- USART2（调试口）指令通道：同一套环形缓冲 + 行组装，复用 DTU_ParseCommand。
      一根 USB-TTL 接 PA2/PA3 即可同时看日志 + 发指令；PA9/PA10 保持专属于 DTU，
@@ -148,11 +157,10 @@ static volatile uint32_t host_rx_arm_fail = 0;   /* ISR 重挂 Receive_IT 失败
 static char host_cmd_line[HOST_RX_RING_SIZE];    /* 任务私有组行缓冲，无竞争 */
 static uint16_t host_line_len = 0;
 
-#define DTU_USE_RDY_PIN 0
+/* 心跳上报周期(ms)：DTU 链路健康由平台侧按上报新鲜度判定（5s 上报，
+   网关侧 15s 未更新判离线），无硬件断连检测——RDY/RST 引脚（PB10/PB11）未接线。
+   旧"断连自动复位"逻辑因 DTU_IsConnected 恒返回 1 而不可达，属死代码，已删除。 */
 #define DTU_REPORT_INTERVAL 5000
-#define DTU_DISCONNECT_LIMIT 2
-#define DTU_RST_HOLD_MS 1200
-static uint8_t dtu_disconnect_cnt = 0;
 
 #define SENSOR_DEBUG_INTERVAL 5000
 /* USER CODE END Variables */
@@ -185,8 +193,8 @@ const osThreadAttr_t ControlTask_attributes = {
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for DtuTask（任务名与硬件职责一致：驱动 4G DTU） */
-osThreadId_t WifiTaskHandle;
-const osThreadAttr_t WifiTask_attributes = {
+osThreadId_t DtuTaskHandle;
+const osThreadAttr_t DtuTask_attributes = {
   .name = "DtuTask",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
@@ -216,7 +224,6 @@ static uint16_t ADC_ReadChannel(uint32_t channel);
 static void UART2_Print(const char *msg);
 static void PrintStackWatermarks(void);
 static void DTU_Init(void);
-static uint8_t DTU_IsConnected(void);
 static void DTU_SendData(const char *data);
 static void DTU_SendTelemetry(const char *did, uint8_t debug_log);
 static void DTU_ParseCommand(const char *cmd);
@@ -286,8 +293,8 @@ void MX_FREERTOS_Init(void) {
   /* creation of ControlTask */
   ControlTaskHandle = osThreadNew(Task3, NULL, &ControlTask_attributes);
 
-  /* creation of WifiTask */
-  WifiTaskHandle = osThreadNew(Task4, NULL, &WifiTask_attributes);
+  /* creation of DtuTask */
+  DtuTaskHandle = osThreadNew(Task4, NULL, &DtuTask_attributes);
 
   /* creation of KeyTask */
   KeyTaskHandle = osThreadNew(Task5, NULL, &KeyTask_attributes);
@@ -343,8 +350,8 @@ void Task1(void *argument)
     data.temp_raw  = SensorFilter(data.temp_raw,  temp_buf,  &temp_sum);
     filter_idx = (filter_idx + 1) % FILTER_SIZE;
 
-    data.light_pct = 100.0f - ((float)data.light_raw / (float)ADC_FULL_SCALE * 100.0f);
-    data.temp_c = 50.0f - ((float)data.temp_raw / (float)ADC_FULL_SCALE * 50.0f);
+    data.light_pct = LIGHT_MAP_MAX_PCT - ((float)data.light_raw / (float)ADC_FULL_SCALE * LIGHT_MAP_MAX_PCT);
+    data.temp_c = TEMP_MAP_MAX_C - ((float)data.temp_raw / (float)ADC_FULL_SCALE * TEMP_MAP_MAX_C);
 
     g_light_value = data.light_pct;
     g_temp_value  = data.temp_c;
@@ -362,7 +369,7 @@ void Task1(void *argument)
       last_debug = HAL_GetTick();
     }
 
-    osDelay(1000);
+    osDelay(SENSOR_SAMPLE_MS);
   }
   /* USER CODE END Task1 */
 }
@@ -384,7 +391,7 @@ void Task2(void *argument)
   uint8_t last_lt = 0xFF, last_tt = 0xFF;
 
   OLED_Clear();
-  osDelay(100);
+  osDelay(DISPLAY_INIT_HOLD_MS);
 
   for (;;)
   {
@@ -462,7 +469,7 @@ void Task2(void *argument)
     }
 
     last_mode = g_work_mode;
-    osDelay(300);
+    osDelay(DISPLAY_REFRESH_MS);
   }
   /* USER CODE END Task2 */
 }
@@ -511,7 +518,7 @@ void Task3(void *argument)
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, g_servo_pulse);
     }
 
-    osDelay(200);
+    osDelay(CONTROL_PERIOD_MS);
   }
   /* USER CODE END Task3 */
 }
@@ -532,7 +539,6 @@ void Task4(void *argument)
   DTU_Init();
   HOST_Init();
   IWDG_Init();   /* 看门狗最后挂载：此后任何死循环/任务饿死都触发硬件复位 */
-  dtu_connected = DTU_IsConnected();
 
   for (;;)
   {
@@ -542,7 +548,7 @@ void Task4(void *argument)
 
     /* 每 10s 打印命令接收统计：连续下发指令后核对 lines 递增、overflow=0，
        是环形缓冲"不丢帧"的板上可观测证据 */
-    if ((HAL_GetTick() - last_rx_stat) >= 10000)
+    if ((HAL_GetTick() - last_rx_stat) >= RX_STATS_INTERVAL_MS)
     {
       char stat[200];
       snprintf(stat, sizeof(stat),
@@ -556,35 +562,15 @@ void Task4(void *argument)
       last_rx_stat = HAL_GetTick();
     }
 
-    dtu_connected = DTU_IsConnected();
-    if (!dtu_connected)
+    /* 心跳上报：DTU 链路健康由平台侧按上报新鲜度判定（见 DTU_REPORT_INTERVAL 注释），
+       无硬件 RDY/RST 断连检测——原"断连自动复位"死逻辑已删除 */
+    if ((HAL_GetTick() - last_report) >= DTU_REPORT_INTERVAL)
     {
-      dtu_disconnect_cnt++;
-      if (dtu_disconnect_cnt >= DTU_DISCONNECT_LIMIT)
-      {
-        const char *msg = "[DTU] disconnected too long, resetting...\r\n";
-        UART2_Print(msg);
-
-        HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_SET);
-        osDelay(DTU_RST_HOLD_MS);
-        HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_RESET);
-        osDelay(5000);
-        DTU_Init();
-        dtu_disconnect_cnt = 0;
-      }
-    }
-    else
-    {
-      dtu_disconnect_cnt = 0;
-
-      if ((HAL_GetTick() - last_report) >= DTU_REPORT_INTERVAL)
-      {
-        DTU_SendTelemetry("0", 1);
-        last_report = HAL_GetTick();
-      }
+      DTU_SendTelemetry("0", 1);
+      last_report = HAL_GetTick();
     }
 
-    osDelay(200);
+    osDelay(DTU_TASK_PERIOD_MS);
   }
   /* USER CODE END Task4 */
 }
@@ -627,7 +613,7 @@ void Task5(void *argument)
             }
             else
             {
-                g_work_mode = (WorkMode_t)(((int)g_work_mode + 1) % 3);
+                g_work_mode = (WorkMode_t)(((int)g_work_mode + 1) % WORK_MODE_COUNT);
                 if (g_work_mode == MODE_MANUAL)
                 {
                     servo_idx = 0;
@@ -647,7 +633,7 @@ void Task5(void *argument)
     uint8_t pb12_now = HAL_GPIO_ReadPin(KEY_SET_GPIO_Port, KEY_SET_Pin);
     if (pb12_prev == 1 && pb12_now == 0)
     {
-        osDelay(30);
+        osDelay(KEY_DEBOUNCE_MS);
         if (HAL_GPIO_ReadPin(KEY_SET_GPIO_Port, KEY_SET_Pin) == 0)
         {
             if (g_work_mode == MODE_MANUAL)
@@ -682,7 +668,7 @@ void Task5(void *argument)
     }
     pb12_prev = pb12_now;
 
-    osDelay(20);
+    osDelay(KEY_POLL_MS);
   }
   /* USER CODE END Task5 */
 }
@@ -717,7 +703,7 @@ static void PrintStackWatermarks(void)
            (unsigned)osThreadGetStackSpace(SensorTaskHandle),
            (unsigned)osThreadGetStackSpace(DisplayTaskHandle),
            (unsigned)osThreadGetStackSpace(ControlTaskHandle),
-           (unsigned)osThreadGetStackSpace(WifiTaskHandle),
+           (unsigned)osThreadGetStackSpace(DtuTaskHandle),
            (unsigned)osThreadGetStackSpace(KeyTaskHandle),
            (unsigned)osThreadGetStackSpace(defaultTaskHandle));
   UART2_Print(line);
@@ -739,15 +725,6 @@ static void DTU_Init(void)
 
   const char *msg = "[DTU] init done\r\n";
   UART2_Print(msg);
-}
-
-static uint8_t DTU_IsConnected(void)
-{
-#if DTU_USE_RDY_PIN
-  return (HAL_GPIO_ReadPin(DTU_RDY_GPIO_Port, DTU_RDY_Pin) == GPIO_PIN_SET) ? 1 : 0;
-#else
-  return 1;
-#endif
 }
 
 static void DTU_SendData(const char *data)

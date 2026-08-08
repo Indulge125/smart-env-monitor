@@ -52,7 +52,7 @@
 extern osThreadId_t SensorTaskHandle;
 extern osThreadId_t DisplayTaskHandle;
 extern osThreadId_t ControlTaskHandle;
-extern osThreadId_t WifiTaskHandle;
+extern osThreadId_t DtuTaskHandle;
 extern osThreadId_t KeyTaskHandle;
 extern osMessageQueueId_t xSensorQueueHandle;
 extern osMessageQueueId_t xKeyQueueHandle;
