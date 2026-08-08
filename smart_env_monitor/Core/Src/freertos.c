@@ -647,7 +647,10 @@ static void DTU_Init(void)
   HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_RESET);
   memset((void *)dtu_rx_buf, 0, sizeof(dtu_rx_buf));
   dtu_rx_idx = 0;
-  HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
+  if (HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1) != HAL_OK)
+  {
+    UART2_Print("[ERR] USART1 RX arm failed\r\n");
+  }
 
   const char *msg = "[DTU] init done\r\n";
   UART2_Print(msg);
@@ -668,8 +671,16 @@ static void DTU_SendData(const char *data)
   {
     return;
   }
-  HAL_UART_Transmit(&huart1, (uint8_t *)data, strlen(data), 500);
-  HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 100);
+  /* DTU 未接电/线断时 Transmit 会阻塞至超时返回 HAL_BUSY，必须检查而非静默丢弃 */
+  if (HAL_UART_Transmit(&huart1, (uint8_t *)data, strlen(data), 500) != HAL_OK)
+  {
+    UART2_Print("[ERR] USART1 TX data failed\r\n");
+    return;
+  }
+  if (HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 100) != HAL_OK)
+  {
+    UART2_Print("[ERR] USART1 TX terminator failed\r\n");
+  }
 }
 
 static void DTU_SendTelemetry(const char *did, uint8_t debug_log)
@@ -788,16 +799,31 @@ static uint16_t SensorFilter(uint16_t new_val, uint16_t *buf, uint32_t *sum)
 static uint16_t ADC_ReadChannel(uint32_t channel)
 {
     ADC_ChannelConfTypeDef sConfig = {0};
+    static uint16_t last_value[2] = {0, 0};  /* 按通道保留上次成功值，转换失败时回退 */
+    uint8_t ch = (channel == ADC_CHANNEL_1) ? 1 : 0;
+
     sConfig.Channel = channel;
     sConfig.Rank = ADC_REGULAR_RANK_1;
     sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 100);
-    uint16_t val = HAL_ADC_GetValue(&hadc1);
+    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+    {
+        UART2_Print("[ERR] ADC config failed\r\n");
+        return last_value[ch];
+    }
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+        UART2_Print("[ERR] ADC start failed\r\n");
+        return last_value[ch];
+    }
+    if (HAL_ADC_PollForConversion(&hadc1, 100) != HAL_OK)
+    {
+        HAL_ADC_Stop(&hadc1);
+        UART2_Print("[ERR] ADC conv timeout\r\n");
+        return last_value[ch];
+    }
+    last_value[ch] = (uint16_t)HAL_ADC_GetValue(&hadc1);
     HAL_ADC_Stop(&hadc1);
-    return val;
+    return last_value[ch];
 }
 
 /* USER CODE END Application */
