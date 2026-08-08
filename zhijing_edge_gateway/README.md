@@ -83,6 +83,16 @@ Demo input: [SENSOR] {"light":74,"temp":27,"mode":0,"servo":1500}
 .\build\Release\zhijing_edge_gateway.exe COM14 115200 --web 8080
 ```
 
+**一键启动（Windows 推荐）**：双击 `启动网关.bat`（默认 COM8/115200/8080），
+或带参数覆盖串口号：
+
+```text
+启动网关.bat COM5
+```
+
+改串口号前先在设备管理器「端口 (COM 和 LPT)」里确认，并**关闭串口助手**
+（COM 口独占，占用时网关会打开失败）。
+
 浏览器打开：
 
 ```text
