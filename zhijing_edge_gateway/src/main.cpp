@@ -23,7 +23,7 @@
 
 struct SensorData {
     int light = 0;
-    int temp = 0;
+    float temp = 0.0f;  /* 支持小数温度，避免 strtol 把 27.5 截断成 27 */
     int mode = 0;
     int servo = 0;
     long long timestampMs = 0;
@@ -36,13 +36,16 @@ struct MqttConfig {
     std::string clientId = "zhijing-edge-gateway";
 };
 
+/* 设备标识，默认 device001；可用 --device-id 覆盖 */
+static std::string g_deviceId = "device001";
+
 static std::string sensorDataToJson(const SensorData& data, bool includeOnline) {
     std::ostringstream out;
     out << "{";
     if (includeOnline) {
         out << R"("online":true,)";
     }
-    out << R"("deviceId":"device001",)"
+    out << R"("deviceId":")" << g_deviceId << R"(",)"
         << R"("temp":)" << data.temp << ","
         << R"("light":)" << data.light << ","
         << R"("mode":)" << data.mode << ","
@@ -97,6 +100,23 @@ private:
 
 static SensorStore g_store;
 static std::atomic<bool> g_running{true};
+static std::atomic<int> g_activeHttpClients{0};
+static SOCKET g_httpServerSocket = INVALID_SOCKET;
+static constexpr int kMaxHttpClients = 32;      /* 并发 HTTP 连接上限，防止 detach 线程无界增长 */
+static bool g_bindLoopback = true;              /* HTTP 默认只绑 127.0.0.1；--expose 开放内网 */
+
+/* Ctrl+C / 关闭控制台窗口：置停止标志并关闭监听 socket，使 accept 立即返回 */
+static BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
+        g_running = false;
+        if (g_httpServerSocket != INVALID_SOCKET) {
+            closesocket(g_httpServerSocket);
+            g_httpServerSocket = INVALID_SOCKET;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static long long currentTimeMs() {
     const auto now = std::chrono::system_clock::now();
@@ -112,8 +132,12 @@ static void printUsage(const char* exeName) {
               << "  " << exeName << " COM14 115200\n"
               << "  " << exeName << " COM14 115200 --web 8080\n"
               << "  " << exeName << " COM14 115200 --mqtt 127.0.0.1 1883 zhijing/device001/telemetry\n"
-              << "  " << exeName << " COM14 115200 --web 8080 --mqtt 127.0.0.1 1883 zhijing/device001/telemetry\n\n"
-              << "Web dashboard:\n"
+              << "  " << exeName << " COM14 115200 --web 8080 --mqtt 127.0.0.1 1883 zhijing/device001/telemetry\n"
+              << "  " << exeName << " COM14 115200 --web 8080 --expose --device-id device002\n\n"
+              << "Options:\n"
+              << "  --expose         bind HTTP to all interfaces (default: 127.0.0.1 only)\n"
+              << "  --device-id ID   override reported device id (default: device001)\n\n"
+              << "Web dashboard (default):\n"
               << "  http://127.0.0.1:8080\n";
 }
 
@@ -180,6 +204,50 @@ static bool sendBytes(SOCKET socketHandle, const std::vector<uint8_t>& bytes) {
     return true;
 }
 
+/* MQTT TCP 连接与 CONNACK 等待的超时（ms），避免 broker 不可达时阻塞整条采集链路 */
+static constexpr DWORD kMqttConnectTimeoutMs = 5000;
+static constexpr DWORD kMqttSocketTimeoutMs = 5000;
+
+/* 非阻塞 connect + select 超时：Winsock 的阻塞 connect 在目标不可达时可卡 20s+ */
+static bool connectWithTimeout(SOCKET s, const sockaddr* addr, int addrLen, DWORD timeoutMs) {
+    u_long nonBlocking = 1;
+    ioctlsocket(s, FIONBIO, &nonBlocking);
+
+    int rc = ::connect(s, addr, addrLen);
+    if (rc == SOCKET_ERROR) {
+        const int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+            u_long blocking = 0;
+            ioctlsocket(s, FIONBIO, &blocking);
+            return false;
+        }
+
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(s, &writeSet);
+        timeval tv{static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+        const int sel = select(0, nullptr, &writeSet, nullptr, &tv);
+        if (sel <= 0) {
+            u_long blocking = 0;
+            ioctlsocket(s, FIONBIO, &blocking);
+            return false;
+        }
+
+        int soError = 0;
+        int optLen = sizeof(soError);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &optLen);
+        if (soError != 0) {
+            u_long blocking = 0;
+            ioctlsocket(s, FIONBIO, &blocking);
+            return false;
+        }
+    }
+
+    u_long blocking = 0;
+    ioctlsocket(s, FIONBIO, &blocking);
+    return true;
+}
+
 class MqttPublisher {
 public:
     explicit MqttPublisher(MqttConfig config) : config_(std::move(config)) {}
@@ -218,7 +286,7 @@ public:
                 continue;
             }
 
-            if (::connect(socket_, ptr->ai_addr, static_cast<int>(ptr->ai_addrlen)) == 0) {
+            if (connectWithTimeout(socket_, ptr->ai_addr, static_cast<int>(ptr->ai_addrlen), kMqttConnectTimeoutMs)) {
                 break;
             }
 
@@ -232,6 +300,9 @@ public:
             close();
             return false;
         }
+
+        DWORD rcvTimeout = kMqttSocketTimeoutMs;
+        setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
 
         const auto packet = makeMqttConnectPacket(config_.clientId, 60);
         if (!sendBytes(socket_, packet)) {
@@ -317,6 +388,33 @@ static std::optional<int> parseIntField(const std::string& json, const std::stri
     return static_cast<int>(value);
 }
 
+/* 浮点 JSON 字段解析：保留小数（如 "temp":27.5），用于温度等模拟量 */
+static std::optional<double> parseFloatField(const std::string& json, const std::string& name) {
+    const std::string key = "\"" + name + "\"";
+    const size_t keyPos = json.find(key);
+    if (keyPos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const size_t colonPos = json.find(':', keyPos + key.size());
+    if (colonPos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    size_t valuePos = colonPos + 1;
+    while (valuePos < json.size() && (json[valuePos] == ' ' || json[valuePos] == '\t' || json[valuePos] == '"')) {
+        ++valuePos;
+    }
+
+    char* endPtr = nullptr;
+    const double value = std::strtod(json.c_str() + valuePos, &endPtr);
+    if (endPtr == json.c_str() + valuePos) {
+        return std::nullopt;
+    }
+
+    return value;
+}
+
 static std::optional<std::string> extractSensorJson(const std::string& line) {
     const size_t markerPos = line.find("[SENSOR]");
     if (markerPos == std::string::npos) {
@@ -339,14 +437,14 @@ static std::optional<SensorData> parseSensorLine(const std::string& line) {
     }
 
     const auto light = parseIntField(*json, "light");
-    const auto temp = parseIntField(*json, "temp");
+    const auto temp = parseFloatField(*json, "temp");
     const auto mode = parseIntField(*json, "mode");
     const auto servo = parseIntField(*json, "servo");
     if (!light || !temp || !mode || !servo) {
         return std::nullopt;
     }
 
-    return SensorData{*light, *temp, *mode, *servo, currentTimeMs()};
+    return SensorData{*light, static_cast<float>(*temp), *mode, *servo, currentTimeMs()};
 }
 
 static std::string nowText() {
@@ -844,6 +942,10 @@ static std::string requestPath(const std::string& request) {
 }
 
 static void handleHttpClient(SOCKET client) {
+    struct ClientGuard {
+        ~ClientGuard() { --g_activeHttpClients; }
+    } guard;  /* 连接计数由 accept 循环 +1，此处负责释放 */
+
     char buffer[2048]{};
     const int received = recv(client, buffer, sizeof(buffer) - 1, 0);
     if (received <= 0) {
@@ -880,7 +982,7 @@ static void runHttpServer(unsigned short port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(g_bindLoopback ? INADDR_LOOPBACK : INADDR_ANY);
     addr.sin_port = htons(port);
 
     if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
@@ -897,16 +999,30 @@ static void runHttpServer(unsigned short port) {
         return;
     }
 
+    g_httpServerSocket = server;
     std::cout << "Web dashboard: http://127.0.0.1:" << port << "\n";
+    if (!g_bindLoopback) {
+        std::cout << "  (bound to all interfaces via --expose)\n";
+    }
     while (g_running) {
         SOCKET client = accept(server, nullptr, nullptr);
         if (client == INVALID_SOCKET) {
+            if (!g_running) {
+                break;  /* Ctrl+C 已关闭监听 socket，正常退出 */
+            }
             continue;
         }
+        if (g_activeHttpClients >= kMaxHttpClients) {
+            sendResponse(client, R"({"error":"too many connections"})", "application/json", "503 Service Unavailable");
+            closesocket(client);
+            continue;
+        }
+        ++g_activeHttpClients;
         std::thread(handleHttpClient, client).detach();
     }
 
     closesocket(server);
+    g_httpServerSocket = INVALID_SOCKET;
     WSACleanup();
 }
 
@@ -1021,8 +1137,14 @@ static int runDemoMode() {
 
 static int runSelfTest() {
     const auto data = parseSensorLine(R"([SENSOR] {"light":74,"temp":27,"mode":0,"servo":1500})");
-    if (!data || data->light != 74 || data->temp != 27 || data->mode != 0 || data->servo != 1500) {
+    if (!data || data->light != 74 || data->temp != 27.0f || data->mode != 0 || data->servo != 1500) {
         std::cerr << "parser self-test failed.\n";
+        return 1;
+    }
+
+    const auto floatData = parseSensorLine(R"([SENSOR] {"light":74,"temp":27.5,"mode":0,"servo":1500})");
+    if (!floatData || floatData->temp != 27.5f) {
+        std::cerr << "float temp parse self-test failed.\n";
         return 1;
     }
 
@@ -1070,7 +1192,7 @@ static int runDemoWeb(unsigned short port) {
             light = 38;
         }
         temp = 25 + ((light / 10) % 5);
-        SensorData data{light, temp, 0, 1500, currentTimeMs()};
+        SensorData data{light, static_cast<float>(temp), 0, 1500, currentTimeMs()};
         g_store.update(data);
         printSensorData(data);
         Sleep(5000);
@@ -1079,7 +1201,7 @@ static int runDemoWeb(unsigned short port) {
 
 static int runDemoMqtt(const MqttConfig& mqttConfig) {
     MqttPublisher mqtt(mqttConfig);
-    SensorData data{74, 27, 0, 1500, currentTimeMs()};
+    SensorData data{74, 27.0f, 0, 1500, currentTimeMs()};
     printSensorData(data);
     return mqtt.publish(data) ? 0 : 1;
 }
@@ -1093,7 +1215,18 @@ static std::optional<unsigned short> parsePort(const char* text) {
     return static_cast<unsigned short>(value);
 }
 
+static std::optional<DWORD> parseBaud(const char* text) {
+    char* endPtr = nullptr;
+    const unsigned long value = std::strtoul(text, &endPtr, 10);
+    if (endPtr == text || *endPtr != '\0' || value < 300 || value > 2000000) {
+        return std::nullopt;
+    }
+    return static_cast<DWORD>(value);
+}
+
 int main(int argc, char* argv[]) {
+    SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+
     if (argc == 2 && std::string(argv[1]) == "--demo") {
         return runDemoMode();
     }
@@ -1102,11 +1235,14 @@ int main(int argc, char* argv[]) {
         return runSelfTest();
     }
 
-    if (argc == 3 && std::string(argv[1]) == "--demo-web") {
+    if (argc >= 3 && argc <= 4 && std::string(argv[1]) == "--demo-web") {
         const auto port = parsePort(argv[2]);
         if (!port) {
             std::cerr << "Invalid web port: " << argv[2] << "\n";
             return 1;
+        }
+        if (argc == 4 && std::string(argv[3]) == "--expose") {
+            g_bindLoopback = false;
         }
         return runDemoWeb(*port);
     }
@@ -1126,11 +1262,12 @@ int main(int argc, char* argv[]) {
     }
 
     const std::string portName = argv[1];
-    const DWORD baudRate = static_cast<DWORD>(std::strtoul(argv[2], nullptr, 10));
-    if (baudRate == 0) {
-        std::cerr << "Invalid baud rate: " << argv[2] << "\n";
+    const auto baud = parseBaud(argv[2]);
+    if (!baud) {
+        std::cerr << "Invalid baud rate (expect 300-2000000): " << argv[2] << "\n";
         return 1;
     }
+    const DWORD baudRate = *baud;
 
     std::optional<MqttConfig> mqttConfig;
     int argIndex = 3;
@@ -1163,6 +1300,22 @@ int main(int argc, char* argv[]) {
             }
             mqttConfig = MqttConfig{argv[argIndex + 1], *mqttPort, argv[argIndex + 3]};
             argIndex += 4;
+            continue;
+        }
+
+        if (option == "--expose") {
+            g_bindLoopback = false;
+            argIndex += 1;
+            continue;
+        }
+
+        if (option == "--device-id") {
+            if (argIndex + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            g_deviceId = argv[argIndex + 1];
+            argIndex += 2;
             continue;
         }
 

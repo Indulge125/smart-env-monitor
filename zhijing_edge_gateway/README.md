@@ -154,8 +154,24 @@ QoS: 0
 STM32 -> UART -> C++ 边缘网关 -> MQTT Broker -> MQTT 客户端
 ```
 
-## 8. 当前限制
+## 8. 安全与健壮性
+
+- **HTTP 默认只绑定 127.0.0.1**：避免内网其他设备直接访问仪表盘；需要对外开放时加 `--expose`。
+- **MQTT 连接带 5 秒超时**：broker 不可达时快速失败。此前 `connect` 在 Windows 上可阻塞 20s+，会拖住整条串口采集链路。
+- **HTTP 并发连接上限 32**：超过即返回 503，防止 `detach` 线程无界增长。
+- **Ctrl+C 优雅退出**：置停止标志并关闭监听 socket，`accept` 立即返回。
+- **浮点温度**：`"temp":27.5` 不再被整数解析截断为 27。
+- **设备标识可配置**：`--device-id device002` 覆盖上报的 `deviceId`（默认 `device001`）。
+
+常用示例：
+
+```powershell
+# 绑定所有网卡，并自定义设备标识
+.\build\Release\zhijing_edge_gateway.exe COM14 115200 --web 8080 --expose --device-id device002
+```
+
+## 9. 当前限制
 
 - MQTT 当前只支持无账号密码、无 TLS、QoS0 发布。
 - 当前没有订阅控制命令，先保证真实数据上报链路稳定。
-- 如果 Broker 断开，程序会在下一条传感器数据到来时尝试重新连接。
+- 如果 Broker 断开，程序会在下一条传感器数据到来时尝试重新连接（5 秒内快速失败，不阻塞采集）。
