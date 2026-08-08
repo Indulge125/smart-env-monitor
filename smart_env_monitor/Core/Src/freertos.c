@@ -349,6 +349,14 @@ void Task2(void *argument)
 
   for (;;)
   {
+    /* 模式跨越 SET 边界时重发 OLED 初始化：复位可能已失同步的 SSD1306
+       （花屏/黑屏自愈，免去断电重启）。首轮 last_mode=0xFF 与 AUTO 同为
+       "非SET"，不会触发。 */
+    if ((last_mode == MODE_SET) != (g_work_mode == MODE_SET))
+    {
+        OLED_Reinit();
+    }
+
     if (g_work_mode == MODE_SET)
     {
         if (last_mode != MODE_SET || last_set_state != g_set_state ||

@@ -10,6 +10,7 @@
 /* OLED_SDA_ 宏名一致，无需映射 */
 
 void OLED_Init(void);
+void OLED_Reinit(void);
 void OLED_Clear(void);
 void OLED_ShowChar(uint8_t Line, uint8_t Column, char Char);
 void OLED_ShowString(uint8_t Line, uint8_t Column, char *String);
