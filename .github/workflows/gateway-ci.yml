@@ -15,8 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不指定 -G：windows-latest 的 VS 版本会随 runner 更新，显式写 2022 会
+      # 在装新版 VS 的 runner 上找不到实例；让 CMake 自动选最高版本
       - name: Configure (MSVC x64)
-        run: cmake -S zhijing_edge_gateway -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S zhijing_edge_gateway -B build -A x64
 
       - name: Build (Release, /W4)
         run: cmake --build build --config Release
