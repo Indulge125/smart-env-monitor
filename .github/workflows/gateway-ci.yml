@@ -1,0 +1,26 @@
+name: gateway-ci
+
+on:
+  push:
+    paths:
+      - 'zhijing_edge_gateway/**'
+      - '.github/workflows/gateway-ci.yml'
+  pull_request:
+    paths:
+      - 'zhijing_edge_gateway/**'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (MSVC x64)
+        run: cmake -S zhijing_edge_gateway -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build (Release, /W4)
+        run: cmake --build build --config Release
+
+      - name: Self-test
+        run: build\Release\zhijing_edge_gateway.exe --self-test
+        shell: cmd
