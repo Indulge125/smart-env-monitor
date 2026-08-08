@@ -103,6 +103,10 @@ volatile uint16_t g_servo_pulse = SERVO_MID_PULSE;
 osSemaphoreId_t xSem_Key;
 const osSemaphoreAttr_t xSem_Key_attr = { .name = "SemKey" };
 
+/* 调试串口互斥量：Task1(传感器) 与 DtuTask(通信) 共用 huart2，防止输出交错 */
+osMutexId_t xHuart2Mutex;
+const osMutexAttr_t xHuart2Mutex_attr = { .name = "Huart2Mutex" };
+
 #define DTU_RX_BUF_SIZE 256
 static uint8_t dtu_rx_byte;
 static uint8_t dtu_rx_buf[DTU_RX_BUF_SIZE];
@@ -178,6 +182,7 @@ const osMessageQueueAttr_t xKeyQueue_attributes = {
 /* USER CODE BEGIN FunctionPrototypes */
 static uint16_t SensorFilter(uint16_t new_val, uint16_t *buf, uint32_t *sum);
 static uint16_t ADC_ReadChannel(uint32_t channel);
+static void UART2_Print(const char *msg);
 static void DTU_Init(void);
 static uint8_t DTU_IsConnected(void);
 static void DTU_SendData(const char *data);
@@ -205,7 +210,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  xHuart2Mutex = osMutexNew(&xHuart2Mutex_attr);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -311,7 +316,7 @@ void Task1(void *argument)
       snprintf(debug_json, sizeof(debug_json),
                "[SENSOR] {\"light\":%d,\"temp\":%d,\"mode\":%d,\"servo\":%d}\r\n",
                l, t, (int)g_work_mode, (int)g_servo_pulse);
-      HAL_UART_Transmit(&huart2, (uint8_t *)debug_json, strlen(debug_json), 100);
+      UART2_Print(debug_json);
       last_debug = HAL_GetTick();
     }
 
@@ -482,7 +487,7 @@ void Task4(void *argument)
       if (dtu_disconnect_cnt >= DTU_DISCONNECT_LIMIT)
       {
         const char *msg = "[DTU] disconnected too long, resetting...\r\n";
-        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+        UART2_Print(msg);
 
         HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_SET);
         osDelay(DTU_RST_HOLD_MS);
@@ -602,6 +607,24 @@ void Task5(void *argument)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
+/* 调试串口输出：互斥保护，避免 Task1 与 DtuTask 输出交错 */
+static void UART2_Print(const char *msg)
+{
+  if (msg == NULL)
+  {
+    return;
+  }
+  if (xHuart2Mutex != NULL)
+  {
+    osMutexAcquire(xHuart2Mutex, osWaitForever);
+  }
+  HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+  if (xHuart2Mutex != NULL)
+  {
+    osMutexRelease(xHuart2Mutex);
+  }
+}
+
 static void DTU_Init(void)
 {
   HAL_GPIO_WritePin(DTU_RST_GPIO_Port, DTU_RST_Pin, GPIO_PIN_RESET);
@@ -610,7 +633,7 @@ static void DTU_Init(void)
   HAL_UART_Receive_IT(&huart1, &dtu_rx_byte, 1);
 
   const char *msg = "[DTU] init done\r\n";
-  HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+  UART2_Print(msg);
 }
 
 static uint8_t DTU_IsConnected(void)
@@ -654,9 +677,9 @@ static void DTU_SendTelemetry(const char *did, uint8_t debug_log)
 
   if (debug_log)
   {
-    HAL_UART_Transmit(&huart2, (uint8_t *)"[DTU] TX dup: ", 14, 100);
-    HAL_UART_Transmit(&huart2, (uint8_t *)json, strlen(json), 100);
-    HAL_UART_Transmit(&huart2, (uint8_t *)"\r\n", 2, 100);
+    char dbg[300];
+    snprintf(dbg, sizeof(dbg), "[DTU] TX dup: %s\r\n", json);
+    UART2_Print(dbg);
   }
 }
 
@@ -670,7 +693,7 @@ static void DTU_ParseCommand(const char *cmd)
   if (strstr(cmd, "\"cmd\":\"sget\"") || strstr(cmd, "\"cmd\": \"sget\""))
   {
     const char *msg = "[DTU] RX sget ignored, auto report only\r\n";
-    HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+    UART2_Print(msg);
   }
   else if (strstr(cmd, "SERVO="))
   {
