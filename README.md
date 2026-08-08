@@ -123,18 +123,48 @@ LED=OFF
 
 ## 📁 仓库结构
 
+本仓库是**嵌入式全链路实践**集合：从 STM32 下位机固件，到 C++ 边缘网关与 Web 仪表盘，再到 DTU 上云与比赛材料。
+
 ```text
-smart-env-monitor/
-├── smart_env_monitor/
-│   ├── Core/           # 外设初始化、FreeRTOS 任务与业务逻辑
-│   ├── Drivers/        # STM32 HAL 与 CMSIS 驱动
-│   ├── Middlewares/    # FreeRTOS 中间件
-│   ├── User/           # OLED、延时等自定义驱动
-│   ├── MDK-ARM/        # Keil uVision 工程
-│   └── *.ioc           # STM32CubeMX 配置
-├── 参考文档/            # 芯片与项目参考资料
-└── 现有模块列表/        # 已有硬件模块清单
+programfirst/
+├── smart_env_monitor/        # STM32F103C8T6 + FreeRTOS 固件（采集/显示/控制/通信）
+├── zhijing_edge_gateway/     # C++17 边缘网关（串口解析 / HTTP API / MQTT 上报）
+├── demo_dashboard/           # 浏览器 Web Serial 实时仪表盘
+├── 参赛材料/                 # 物联网设计大赛答辩材料（架构图 / 视频文案 / DTU 脚本）
+├── docs/                     # 系统设计文档
+├── tools/                    # 比赛材料生成脚本（一次性工具）
+├── 日志截图/                 # 设备运行日志与数据截图
+├── 参考文档/                 # 芯片与项目参考资料
+└── 现有模块列表/             # 已有硬件模块清单
 ```
+
+### 端到端数据链路
+
+```mermaid
+flowchart LR
+    S[光照 / 温度传感器] --> F[STM32F103C8T6 固件<br/>FreeRTOS 采集·滤波·控制]
+    K[按键] --> F
+    F -->|USART1 UART/JSON| D[4G DTU / 银尔达 M100M-C2]
+    F -->|USART2 调试日志| G[C++ 边缘网关<br/>解析 · 存储 · HTTP API]
+    D -->|MQTT| C[云平台 / 银尔达 IoT]
+    G -->|HTTP| W[Web 仪表盘<br/>zhijing_edge_gateway / demo_dashboard]
+    F --> O[OLED · 舵机 · LED · 蜂鸣器]
+```
+
+
+## 📊 性能指标
+
+实测资源占用（Keil MDK-ARM 链接器 `.map` 输出，AC5 优化开启）：
+
+| 指标 | 数值 | 说明 |
+| --- | --- | --- |
+| Flash 占用 | **24.87 KB / 64 KB（39%）** | 链接器 `Total ROM Size` |
+| RAM 占用 | **15.38 KB / 20 KB（77%）** | 链接器 `Total RW Size`（RW+ZI），余量约 4.6 KB |
+| 传感器采样周期 | 1 s | 16 点滑动平均滤波 |
+| 遥测上报周期 | 5 s | USART1 输出 `dup` JSON |
+| 舵机 PWM | 50 Hz，500–2500 μs | TIM1 预分频 71 / 周期 19999 |
+
+> 任务栈水位、精确采样抖动等指标为后续 `uxTaskGetStackHighWaterMark` 实测补充项。
 
 ## 🚀 快速开始
 
