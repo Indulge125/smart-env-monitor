@@ -63,47 +63,69 @@ Smart Env Monitor 是一个运行在 **STM32F103C8T6** 上的嵌入式环境监�
 
 ```mermaid
 flowchart TB
-    subgraph SENSE["感知层 · Sensing Layer"]
-        L["光照传感器<br/><i>Light Sensor · ADC CH0</i>"]
-        T["温度传感器<br/><i>Temp Sensor · ADC CH1</i>"]
-        K["按键<br/><i>Buttons · GPIO EXTI</i>"]
+    subgraph SENSE["🎛️ 感知层"]
+        direction LR
+        L["<b>光照传感器</b><br/>ADC CH0"]
+        T["<b>温度传感器</b><br/>ADC CH1"]
+        K["<b>按键</b><br/>GPIO EXTI"]
     end
 
-    subgraph MCU["核心 MCU · STM32F103C8T6 / Cortex-M3"]
+    subgraph MCU["🧠 STM32F103C8T6 · Cortex-M3 @ 72MHz"]
         subgraph OS["FreeRTOS V10 · CMSIS-RTOS v2"]
             direction LR
-            TK["KeyTask<br/>20 ms"]
-            TS["SensorTask<br/>1 s · 采样+滤波"]
-            TC["ControlTask<br/>200 ms · 阈值控制"]
-            TD["DisplayTask<br/>300 ms"]
-            TU["DtuTask<br/>200 ms · 解析 / 5 s 上报"]
+            TK["<b>KeyTask</b><br/>20 ms"]
+            TS["<b>SensorTask</b><br/>1 s · 采样+滤波"]
+            TC["<b>ControlTask</b><br/>200 ms · 阈值控制"]
+            TD["<b>DisplayTask</b><br/>300 ms"]
+            TU["<b>DtuTask</b><br/>200 ms 解析<br/>5 s 上报"]
         end
-        WDT["IWDG 看门狗<br/>约 2 s 自愈"]
+        WDT["🐕 <b>IWDG 看门狗</b><br/>约 2 s 自愈"]
     end
 
-    subgraph ACT["执行层 · Actuator Layer"]
-        O["SSD1306 OLED<br/><i>I2C</i>"]
-        S["舵机 Servo<br/><i>TIM1 PWM 50 Hz</i>"]
-        E["LED / 蜂鸣器<br/><i>GPIO / PWM</i>"]
+    subgraph ACT["⚙️ 执行层"]
+        direction LR
+        O["<b>SSD1306 OLED</b><br/>软件 I2C"]
+        S["<b>舵机</b><br/>TIM1 PWM 50Hz"]
+        E["<b>LED / 蜂鸣器</b><br/>GPIO / PWM"]
     end
 
-    subgraph COM["通信与云 · Comms & Cloud"]
-        DTU["4G DTU 银尔达 M100M-C2"]
-        GW["C++17 边缘网关<br/><i>Winsock · 零依赖</i>"]
-        CLOUD["云平台 · 银尔达 IoT"]
-        WEB["Web 仪表盘<br/><i>HTML/JS · Web Serial</i>"]
-        DTU -->|"MQTT · QoS0"| CLOUD
-        GW -->|"HTTP/1.1"| WEB
+    subgraph COM["☁️ 通信与云"]
+        direction TB
+        DTU["<b>4G DTU</b> 银尔达 M100M-C2"]
+        GW["<b>C++17 边缘网关</b><br/>Winsock · 零依赖"]
+        CLOUD["<b>云平台</b> 银尔达 IoT"]
+        WEB["<b>Web 仪表盘</b> HTML/JS"]
+        DTU ==>|"MQTT QoS0"| CLOUD
+        GW ==>|"HTTP/1.1"| WEB
     end
 
-    L --> MCU
-    T --> MCU
-    K --> MCU
-    MCU --> O
-    MCU --> S
-    MCU --> E
-    MCU -->|"USART1 · 115200<br/>JSON 遥测 / 指令"| DTU
-    MCU -->|"USART2 · 115200<br/>日志帧"| GW
+    L --> TS
+    T --> TS
+    K --> TK
+    TS -->|"队列"| TC
+    TC --> S
+    TC --> E
+    TD --> O
+    TU ==>|"USART1 · 115200<br/>JSON 遥测 / 指令"| DTU
+    TU ==>|"USART2 · 115200<br/>日志帧"| GW
+
+    classDef sense fill:#f0fdf4,color:#166534,stroke:#22c55e,stroke-width:1.5px
+    classDef mcu   fill:#eff6ff,color:#1e3a8a,stroke:#3b82f6,stroke-width:1.5px
+    classDef task  fill:#f5f3ff,color:#5b21b6,stroke:#8b5cf6,stroke-width:1.2px
+    classDef act   fill:#fff7ed,color:#9a3412,stroke:#f97316,stroke-width:1.5px
+    classDef com   fill:#fdf2f8,color:#9d174d,stroke:#ec4899,stroke-width:1.5px
+
+    class L,T,K sense
+    class WDT mcu
+    class TK,TS,TC,TD,TU task
+    class O,S,E act
+    class DTU,GW,CLOUD,WEB com
+
+    style SENSE fill:#f7fef9,stroke:#86efac,stroke-width:1px
+    style OS    fill:#fbfaff,stroke:#c4b5fd,stroke-width:1px
+    style MCU   fill:#f8fbff,stroke:#93c5fd,stroke-width:1px
+    style ACT   fill:#fffbf5,stroke:#fdba74,stroke-width:1px
+    style COM   fill:#fefafc,stroke:#f9a8d4,stroke-width:1px
 ```
 
 <sub>分层架构：感知 → 调度 → 执行 → 通信，每条链路的协议与速率标注在边上（GitHub 原生渲染 Mermaid）</sub>
@@ -170,12 +192,38 @@ LED=OFF
 
 ```mermaid
 flowchart LR
-    S["光照 / 温度传感器<br/><i>Sensors · ADC</i>"] --> F["STM32 固件<br/><i>FreeRTOS · STM32 HAL</i>"]
-    F -->|"USART1 · 115200<br/>JSON · 5 s"| D["4G DTU<br/><i>银尔达 M100M-C2</i>"]
-    F -->|"USART2 · 115200<br/>日志帧"| G["C++ 边缘网关<br/><i>C++17 · Winsock · MQTT</i>"]
-    D -->|"MQTT · QoS0"| C["云平台<br/><i>银尔达 IoT</i>"]
-    G -->|"HTTP/1.1<br/>/api/latest · /api/history"| W["Web 仪表盘<br/><i>HTML/JS · Web Serial</i>"]
-    F --> O["OLED · 舵机 · LED · 蜂鸣器"]
+    subgraph DEV["设备端"]
+        direction TB
+        S["光照 / 温度<br/><i>ADC 采样</i>"]
+        F["<b>STM32 固件</b><br/>FreeRTOS · HAL"]
+        A["OLED · 舵机<br/>LED · 蜂鸣器"]
+        S ==> F ==> A
+    end
+
+    subgraph NET["两条上行链路"]
+        direction TB
+        D["<b>4G DTU</b><br/>银尔达 M100M-C2"]
+        G["<b>C++ 边缘网关</b><br/>C++17 · Winsock · MQTT"]
+    end
+
+    C["<b>云平台</b><br/>银尔达 IoT"]
+    W["<b>Web 仪表盘</b><br/>HTML / JS"]
+
+    F ==>|"USART1 · 115200<br/>JSON · 5 s"| D
+    F ==>|"USART2 · 115200<br/>日志帧"| G
+    D ==>|"MQTT QoS0"| C
+    G ==>|"HTTP/1.1<br/>/api/latest · /api/history"| W
+
+    classDef dev   fill:#eff6ff,color:#1e3a8a,stroke:#3b82f6,stroke-width:1.5px
+    classDef net   fill:#fff7ed,color:#9a3412,stroke:#f97316,stroke-width:1.5px
+    classDef cloud fill:#fdf2f8,color:#9d174d,stroke:#ec4899,stroke-width:1.5px
+
+    class S,F,A dev
+    class D,G net
+    class C,W cloud
+
+    style DEV fill:#f8fbff,stroke:#93c5fd,stroke-width:1px
+    style NET fill:#fffbf5,stroke:#fdba74,stroke-width:1px
 ```
 
 两条上行通道并行独立：**DTU 通道**（USART1 → MQTT → 云平台，设备侧 5 s 心跳）与**网关通道**（USART2 → C++17 网关 → HTTP API / MQTT 二次上报 → Web 仪表盘），任一链路故障不影响另一条。
