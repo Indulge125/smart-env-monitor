@@ -325,7 +325,7 @@ build\Release\zhijing_edge_gateway.exe COM14 115200 --web 8080
 
 ## 📬 联系方式
 
-如需交流项目、嵌入式开发或合作，可发送邮件至 [1156852317@qq.com](mailto:1156852317@qq.com)。
+如需交流项目、嵌入式开发或合作，可发送邮件至 [songjie2027@126.com](mailto:songjie2027@126.com)。
 
 ---
 
